@@ -4,19 +4,17 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
-	"strconv"
-	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/labstack/echo/v4"
+	_ "github.com/lib/pq"
 
-	mysqlRepo "github.com/bxcodec/go-clean-arch/internal/repository/mysql"
+	"distributed-task-queue/internal/migration"
+	postgresRepo "distributed-task-queue/internal/repository/postgresql"
+	"distributed-task-queue/internal/rest"
+	job "distributed-task-queue/services"
+	queue "distributed-task-queue/services"
 
-	"github.com/bxcodec/go-clean-arch/article"
-	"github.com/bxcodec/go-clean-arch/internal/rest"
-	"github.com/bxcodec/go-clean-arch/internal/rest/middleware"
 	"github.com/joho/godotenv"
 )
 
@@ -39,18 +37,23 @@ func main() {
 	dbUser := os.Getenv("DATABASE_USER")
 	dbPass := os.Getenv("DATABASE_PASS")
 	dbName := os.Getenv("DATABASE_NAME")
-	connection := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", dbUser, dbPass, dbHost, dbPort, dbName)
-	val := url.Values{}
-	val.Add("parseTime", "1")
-	val.Add("loc", "Asia/Jakarta")
-	dsn := fmt.Sprintf("%s?%s", connection, val.Encode())
-	dbConn, err := sql.Open(`mysql`, dsn)
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", dbHost, dbPort, dbUser, dbPass, dbName)
+	dbConn, err := sql.Open(`postgres`, dsn)
 	if err != nil {
 		log.Fatal("failed to open connection to database", err)
 	}
 	err = dbConn.Ping()
 	if err != nil {
 		log.Fatal("failed to ping database ", err)
+	}
+
+	// Run database migrations
+	migrationsPath := os.Getenv("MIGRATIONS_PATH")
+	if migrationsPath == "" {
+		migrationsPath = "migrations"
+	}
+	if err := migration.RunMigrations(dbConn, migrationsPath); err != nil {
+		log.Fatal("failed to run migrations: ", err)
 	}
 
 	defer func() {
@@ -62,23 +65,16 @@ func main() {
 	// prepare echo
 
 	e := echo.New()
-	e.Use(middleware.CORS)
-	timeoutStr := os.Getenv("CONTEXT_TIMEOUT")
-	timeout, err := strconv.Atoi(timeoutStr)
-	if err != nil {
-		log.Println("failed to parse timeout, using default timeout")
-		timeout = defaultTimeout
-	}
-	timeoutContext := time.Duration(timeout) * time.Second
-	e.Use(middleware.SetRequestContextWithTimeout(timeoutContext))
 
 	// Prepare Repository
-	authorRepo := mysqlRepo.NewAuthorRepository(dbConn)
-	articleRepo := mysqlRepo.NewArticleRepository(dbConn)
+	queueRepo := *postgresRepo.NewQueueRepository(dbConn)
+	jobRepo := *postgresRepo.NewJobRepository(dbConn)
 
 	// Build service Layer
-	svc := article.NewService(articleRepo, authorRepo)
-	rest.NewArticleHandler(e, svc)
+	queueSvc := queue.NewQueueService(queueRepo)
+	jobSvc := job.NewJobService(jobRepo)
+	rest.NewQueueHandler(e, *queueSvc)
+	rest.NewJobHandler(e, *jobSvc)
 
 	// Start Server
 	address := os.Getenv("SERVER_ADDRESS")

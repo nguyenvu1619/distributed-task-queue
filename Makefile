@@ -1,8 +1,8 @@
 # Database
-MYSQL_USER ?= user
-MYSQL_PASSWORD ?= password
-MYSQL_ADDRESS ?= 127.0.0.1:3306
-MYSQL_DATABASE ?= article
+POSTGRES_USER ?= user
+POSTGRES_PASSWORD ?= password
+POSTGRES_ADDRESS ?= 127.0.0.1:5432
+POSTGRES_DATABASE ?= article
 
 # Exporting bin folder to the path for makefile
 export PATH   := $(PWD)/bin:$(PATH)
@@ -28,9 +28,8 @@ install-deps: migrate air gotestsum tparse mockery ## Install Development Depend
 deps: $(MIGRATE) $(AIR) $(GOTESTSUM) $(TPARSE) $(MOCKERY) $(GOLANGCI) ## Checks for Global Development Dependencies.
 deps:
 	@echo "Required Tools Are Available"
-
 dev-env: ## Bootstrap Environment (with a Docker-Compose help).
-	@ docker-compose up -d --build mysql
+	@ docker-compose up -d --build postgres
 
 dev-env-test: dev-env ## Run application (within a Docker-Compose help)
 	@ $(MAKE) image-build
@@ -107,31 +106,32 @@ image-build:
 		--tag go-clean-arch \
 			.
 
-# Commenting this as this not relevant for the project, we load the DB data from the SQL file.
-# please refer this when introducing the database schema migrations.
+# ~~~ Database Migrations ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# # ~~~ Database Migrations ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- 
+POSTGRES_DSN := "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_ADDRESS)/$(POSTGRES_DATABASE)?sslmode=disable"
 
-# MYSQL_DSN := "mysql://$(MYSQL_USER):$(MYSQL_PASSWORD)@tcp($(MYSQL_ADDRESS))/$(MYSQL_DATABASE)"
+.PHONY: migrate-up
+migrate-up: $(MIGRATE) ## Apply all (or N up) migrations.
+	@ read -p "How many migrations to apply (default: all): " N; \
+	migrate -database $(POSTGRES_DSN) -path=migrations up $${N:-}
 
-# migrate-up: $(MIGRATE) ## Apply all (or N up) migrations.
-# 	@ read -p "How many migration you wants to perform (default value: [all]): " N; \
-# 	migrate  -database $(MYSQL_DSN) -path=misc/migrations up ${NN}
+.PHONY: migrate-down
+migrate-down: $(MIGRATE) ## Apply all (or N down) migrations.
+	@ read -p "How many migrations to rollback (default: all): " N; \
+	migrate -database $(POSTGRES_DSN) -path=migrations down $${N:-}
 
-# .PHONY: migrate-down
-# migrate-down: $(MIGRATE) ## Apply all (or N down) migrations.
-# 	@ read -p "How many migration you wants to perform (default value: [all]): " N; \
-# 	migrate  -database $(MYSQL_DSN) -path=misc/migrations down ${NN}
+.PHONY: migrate-drop
+migrate-drop: $(MIGRATE) ## Drop everything inside the database.
+	migrate -database $(POSTGRES_DSN) -path=migrations drop
 
-# .PHONY: migrate-drop
-# migrate-drop: $(MIGRATE) ## Drop everything inside the database.
-# 	migrate  -database $(MYSQL_DSN) -path=misc/migrations drop
+.PHONY: migrate-create
+migrate-create: $(MIGRATE) ## Create a set of up/down migrations with a specified name.
+	@ read -p "Please provide name for the migration: " Name; \
+	migrate create -ext sql -dir migrations $${Name}
 
-# .PHONY: migrate-create
-# migrate-create: $(MIGRATE) ## Create a set of up/down migrations with a specified name.
-# 	@ read -p "Please provide name for the migration: " Name; \
-# 	migrate create -ext sql -dir misc/migrations $${Name}
+.PHONY: migrate-version
+migrate-version: $(MIGRATE) ## Show current migration version.
+	migrate -database $(POSTGRES_DSN) -path=migrations version
 
 # ~~~ Cleans ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
