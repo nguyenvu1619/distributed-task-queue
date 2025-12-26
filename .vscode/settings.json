@@ -1,12 +1,12 @@
 {
   "editor.quickSuggestions": {
-    "other": false,
+    "other": true,
     "comments": false,
     "strings": false
   },
-  "editor.suggestOnTriggerCharacters": false,
+  "editor.suggestOnTriggerCharacters": true,
   "editor.wordBasedSuggestions": "off",
-  "editor.parameterHints.enabled": false,
+  "editor.parameterHints.enabled": true,
   "editor.acceptSuggestionOnCommitCharacter": false,
   "editor.tabCompletion": "off",
   "editor.suggest.showWords": false,

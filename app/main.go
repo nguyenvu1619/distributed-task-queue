@@ -7,7 +7,9 @@ import (
 	"os"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/lib/pq"
+	echoSwagger "github.com/swaggo/echo-swagger"
 
 	"distributed-task-queue/internal/migration"
 	postgresRepo "distributed-task-queue/internal/repository/postgresql"
@@ -65,6 +67,11 @@ func main() {
 	// prepare echo
 
 	e := echo.New()
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+
+	// Swagger endpoint
+	e.GET("/swagger/*", echoSwagger.WrapHandler)
 
 	// Prepare Repository
 	queueRepo := *postgresRepo.NewQueueRepository(dbConn)

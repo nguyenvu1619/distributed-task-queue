@@ -2,7 +2,7 @@
 POSTGRES_USER ?= user
 POSTGRES_PASSWORD ?= password
 POSTGRES_ADDRESS ?= 127.0.0.1:5432
-POSTGRES_DATABASE ?= article
+POSTGRES_DATABASE ?= queue
 
 # Exporting bin folder to the path for makefile
 export PATH   := $(PWD)/bin:$(PATH)
@@ -24,8 +24,8 @@ up: dev-env dev-air             ## Startup / Spinup Docker Compose and air
 down: docker-stop               ## Stop Docker
 destroy: docker-teardown clean  ## Teardown (removes volumes, tmp files, etc...)
 
-install-deps: migrate air gotestsum tparse mockery ## Install Development Dependencies (localy).
-deps: $(MIGRATE) $(AIR) $(GOTESTSUM) $(TPARSE) $(MOCKERY) $(GOLANGCI) ## Checks for Global Development Dependencies.
+install-deps: migrate air gotestsum tparse mockery swag ## Install Development Dependencies (localy).
+deps: $(MIGRATE) $(AIR) $(GOTESTSUM) $(TPARSE) $(MOCKERY) $(GOLANGCI) $(SWAG) ## Checks for Global Development Dependencies.
 deps:
 	@echo "Required Tools Are Available"
 dev-env: ## Bootstrap Environment (with a Docker-Compose help).
@@ -106,6 +106,18 @@ image-build:
 		--tag go-clean-arch \
 			.
 
+# ~~~ Swagger Documentation ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+swagger: $(SWAG) ## Generate Swagger documentation
+	@echo "Generating Swagger documentation..."
+	@$(SWAG) init -g app/main.go -o docs
+	@echo "Swagger documentation generated in docs/ directory"
+
+swagger-clean: ## Clean generated Swagger documentation
+	@echo "Cleaning Swagger documentation..."
+	@rm -rf docs
+	@echo "Swagger documentation cleaned"
+
 # ~~~ Database Migrations ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 POSTGRES_DSN := "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_ADDRESS)/$(POSTGRES_DATABASE)?sslmode=disable"
@@ -113,12 +125,20 @@ POSTGRES_DSN := "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_ADD
 .PHONY: migrate-up
 migrate-up: $(MIGRATE) ## Apply all (or N up) migrations.
 	@ read -p "How many migrations to apply (default: all): " N; \
-	migrate -database $(POSTGRES_DSN) -path=migrations up $${N:-}
+	if [ -z "$$N" ] || [ "$$N" = "all" ]; then \
+		migrate -database $(POSTGRES_DSN) -path=migrations up; \
+	else \
+		migrate -database $(POSTGRES_DSN) -path=migrations up $$N; \
+	fi
 
 .PHONY: migrate-down
 migrate-down: $(MIGRATE) ## Apply all (or N down) migrations.
 	@ read -p "How many migrations to rollback (default: all): " N; \
-	migrate -database $(POSTGRES_DSN) -path=migrations down $${N:-}
+	if [ -z "$$N" ] || [ "$$N" = "all" ]; then \
+		migrate -database $(POSTGRES_DSN) -path=migrations down; \
+	else \
+		migrate -database $(POSTGRES_DSN) -path=migrations down $$N; \
+	fi
 
 .PHONY: migrate-drop
 migrate-drop: $(MIGRATE) ## Drop everything inside the database.

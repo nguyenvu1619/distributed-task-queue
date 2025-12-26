@@ -97,3 +97,19 @@ bin/golangci-lint: bin
 	@ printf "Install golangci-linter... "
 	@ curl -Ls $(shell echo $(call github_url) | tr A-Z a-z) | tar -zOxf - $(shell printf golangci-lint-$(VERSION)-$(OSTYPE)-$(ARCH)/golangci-lint | tr A-Z a-z ) > $@ && chmod +x $@
 	@ echo "done."
+
+# ~~ [ swag ] ~~~ https://github.com/swaggo/swag ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+SWAG := $(shell command -v swag || echo "bin/swag")
+swag: bin/swag ## Installs swag (swagger documentation generator)
+
+bin/swag: bin
+	@ printf "Install swag... "
+	@ go install github.com/swaggo/swag/cmd/swag@latest
+	@ if [ -f $$(go env GOPATH)/bin/swag ]; then \
+		cp $$(go env GOPATH)/bin/swag $@; \
+	else \
+		echo "Error: swag not found after installation"; \
+		exit 1; \
+	fi
+	@ echo "done."

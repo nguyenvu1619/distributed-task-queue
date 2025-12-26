@@ -11,14 +11,12 @@ import (
 	"distributed-task-queue/domain"
 )
 
-// ResponseError represent the response error struct
-
-// ArticleHandler  represent the httphandler for article
+// QueueHandler  represent the httphandler for queue
 type QueueHandler struct {
 	Service *queue.QueueService
 }
 
-// NewJobHandler will initialize the jobs/ resources endpoint
+// NewQueueHandler will initialize the queues/ resources endpoint
 func NewQueueHandler(e *echo.Echo, svc queue.QueueService) {
 	handler := &QueueHandler{
 		Service: &svc,
@@ -27,7 +25,17 @@ func NewQueueHandler(e *echo.Echo, svc queue.QueueService) {
 	e.GET("/queues/:id", handler.GetQueue)
 }
 
-// PublishJob will publish the job based on given params
+// CreateQueue will create a new queue
+// @Summary      Create a new queue
+// @Description  Create a new queue with specified configuration
+// @Tags         queues
+// @Accept       json
+// @Produce      json
+// @Param        queue  body      domain.Queue  true  "Queue object"
+// @Success      200    {object}  domain.Queue
+// @Failure      422    {string}  string  "Unprocessable Entity"
+// @Failure      500    {string}  string  "Internal Server Error"
+// @Router       /queues [post]
 func (a *QueueHandler) CreateQueue(c echo.Context) error {
 
 	var queue domain.Queue
@@ -46,7 +54,17 @@ func (a *QueueHandler) CreateQueue(c echo.Context) error {
 	return c.JSON(http.StatusOK, created)
 }
 
-// GetByID will get article by given id
+// GetQueue will get queue by given id
+// @Summary      Get queue by ID
+// @Description  Retrieve a queue by its ID
+// @Tags         queues
+// @Accept       json
+// @Produce      json
+// @Param        id   path      int     true  "Queue ID"
+// @Success      200  {object}  domain.Queue
+// @Failure      404  {string}  string  "Not Found"
+// @Failure      500  {string}  string  "Internal Server Error"
+// @Router       /queues/{id} [get]
 func (a *QueueHandler) GetQueue(c echo.Context) error {
 	idP, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {

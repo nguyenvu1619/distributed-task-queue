@@ -10,9 +10,7 @@ import (
 	"distributed-task-queue/domain"
 )
 
-// ResponseError represent the response error struct
-
-// ArticleHandler  represent the httphandler for article
+// JobHandler  represent the httphandler for job
 type JobHandler struct {
 	Service *job.JobService
 }
@@ -27,6 +25,16 @@ func NewJobHandler(e *echo.Echo, svc job.JobService) {
 }
 
 // PublishJob will publish the job based on given params
+// @Summary      Publish a new job
+// @Description  Create and publish a new job to the queue
+// @Tags         jobs
+// @Accept       json
+// @Produce      json
+// @Param        job  body      domain.Job  true  "Job object"
+// @Success      200  {object}  domain.Job
+// @Failure      422  {string}  string  "Unprocessable Entity"
+// @Failure      500  {string}  string  "Internal Server Error"
+// @Router       /jobs [post]
 func (a *JobHandler) PublishJob(c echo.Context) error {
 
 	var job domain.Job
@@ -45,7 +53,15 @@ func (a *JobHandler) PublishJob(c echo.Context) error {
 	return c.JSON(http.StatusOK, created)
 }
 
-// GetByID will get article by given id
+// PullJobs will pull pending jobs from the queue
+// @Summary      Pull pending jobs
+// @Description  Retrieve pending jobs from the queue
+// @Tags         jobs
+// @Accept       json
+// @Produce      json
+// @Success      200  {array}   domain.Job
+// @Failure      500  {string}  string  "Internal Server Error"
+// @Router       /jobs [get]
 func (a *JobHandler) PullJobs(c echo.Context) error {
 	ctx := c.Request().Context()
 

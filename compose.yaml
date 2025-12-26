@@ -2,7 +2,7 @@ version: "3.7"
 services:
   web:
     image: go-clean-arch
-    container_name: article_management_api
+    container_name: queue_management_api
     ports:
       - 9090:9090
     depends_on:
@@ -14,16 +14,14 @@ services:
   postgres:
     image: postgres:16
     container_name: go_clean_arch_postgres
-    volumes:
-      - ./article.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - 5432:5432
     environment:
-      - POSTGRES_DB=article
+      - POSTGRES_DB=queue
       - POSTGRES_USER=user
       - POSTGRES_PASSWORD=password
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d article"]
+      test: ["CMD-SHELL", "pg_isready -U user -d queue"]
       interval: 5s
       timeout: 5s
       retries: 10

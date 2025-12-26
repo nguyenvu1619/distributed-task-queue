@@ -1,0 +1,295 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "contact": {}
+    },
+    "paths": {
+        "/jobs": {
+            "get": {
+                "description": "Retrieve pending jobs from the queue",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "jobs"
+                ],
+                "summary": "Pull pending jobs",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Job"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Create and publish a new job to the queue",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "jobs"
+                ],
+                "summary": "Publish a new job",
+                "parameters": [
+                    {
+                        "description": "Job object",
+                        "name": "job",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/domain.Job"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/domain.Job"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/queues": {
+            "post": {
+                "description": "Create a new queue with specified configuration",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "queues"
+                ],
+                "summary": "Create a new queue",
+                "parameters": [
+                    {
+                        "description": "Queue object",
+                        "name": "queue",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/domain.Queue"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/domain.Queue"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/queues/{id}": {
+            "get": {
+                "description": "Retrieve a queue by its ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "queues"
+                ],
+                "summary": "Get queue by ID",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Queue ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/domain.Queue"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "domain.Job": {
+            "description": "Job information for task processing",
+            "type": "object",
+            "properties": {
+                "attempts": {
+                    "type": "integer",
+                    "example": 0
+                },
+                "completed_at": {
+                    "type": "string",
+                    "example": "2024-01-01T00:00:00Z"
+                },
+                "created_at": {
+                    "type": "string",
+                    "example": "2024-01-01T00:00:00Z"
+                },
+                "group_id": {
+                    "type": "string",
+                    "example": "group-123"
+                },
+                "id": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "example": "unique-key-123"
+                },
+                "metadata": {
+                    "$ref": "#/definitions/domain.Metadata"
+                },
+                "payload": {
+                    "type": "string",
+                    "example": "{\"task\": \"data\"}"
+                },
+                "queue_id": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "status": {
+                    "enum": [
+                        "PENDING",
+                        "PROCESSING",
+                        "COMPLETED",
+                        "FAILED"
+                    ],
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/domain.JobStatus"
+                        }
+                    ],
+                    "example": "PENDING"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "example": "2024-01-01T00:00:00Z"
+                }
+            }
+        },
+        "domain.JobStatus": {
+            "type": "string",
+            "enum": [
+                "PENDING",
+                "PROCESSING",
+                "COMPLETED",
+                "FAILED"
+            ],
+            "x-enum-varnames": [
+                "JobStatusPending",
+                "JobStatusProcessing",
+                "JobStatusCompleted",
+                "JobStatusFailed"
+            ]
+        },
+        "domain.Metadata": {
+            "type": "object",
+            "properties": {
+                "consumer_id": {
+                    "type": "string",
+                    "example": "consumer-123"
+                },
+                "last_pull_at": {
+                    "type": "string",
+                    "example": "2024-01-01T00:00:00Z"
+                }
+            }
+        },
+        "domain.Queue": {
+            "description": "Queue configuration for task processing",
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "description": "DLQInterval   time.Duration `json:\"dlq_interval\"`\nDLQId         int64         `json:\"dlq_id\"`",
+                    "type": "string",
+                    "example": "2024-01-01T00:00:00Z"
+                },
+                "id": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "lease_duration": {
+                    "description": "Duration in Go format (e.g., \"30s\", \"1m\")",
+                    "type": "string",
+                    "example": "30s"
+                },
+                "max_attempts": {
+                    "type": "integer",
+                    "example": 3
+                },
+                "name": {
+                    "type": "string",
+                    "example": "default-queue"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "example": "2024-01-01T00:00:00Z"
+                }
+            }
+        }
+    }
+}
