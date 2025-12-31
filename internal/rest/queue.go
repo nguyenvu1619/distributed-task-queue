@@ -6,7 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	queue "distributed-task-queue/services"
+	"distributed-task-queue/services/queue"
 
 	"distributed-task-queue/domain"
 )
@@ -22,6 +22,7 @@ func NewQueueHandler(e *echo.Echo, svc queue.QueueService) {
 		Service: &svc,
 	}
 	e.POST("/queues", handler.CreateQueue)
+	e.GET("/queues", handler.GetQueues)
 	e.GET("/queues/:id", handler.GetQueue)
 }
 
@@ -44,9 +45,7 @@ func (a *QueueHandler) CreateQueue(c echo.Context) error {
 		return c.JSON(http.StatusUnprocessableEntity, err.Error())
 	}
 
-	ctx := c.Request().Context()
-
-	created, err := a.Service.CreateQueue(ctx, queue)
+	created, err := a.Service.CreateQueue(queue)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, err.Error())
 	}
@@ -72,12 +71,33 @@ func (a *QueueHandler) GetQueue(c echo.Context) error {
 	}
 
 	id := int64(idP)
-	ctx := c.Request().Context()
 
-	queue, err := a.Service.GetQueue(ctx, id)
+	queue, err := a.Service.GetQueue(id)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, err.Error())
 	}
 
 	return c.JSON(http.StatusOK, queue)
+}
+
+// GetQueues will get all queues
+// @Summary      Get all queues
+// @Description  Retrieve all queues
+// @Tags         queues
+// @Accept       json
+// @Produce      json
+// @Success      200  {array}   domain.Queue
+// @Failure      500  {string}  string  "Internal Server Error"
+// @Router       /queues [get]
+func (a *QueueHandler) GetQueues(c echo.Context) error {
+	c.Logger().Info("GetQueues called")
+
+	queues, err := a.Service.GetAllQueues()
+	if err != nil {
+		c.Logger().Errorf("Error getting queues: %v", err)
+		return c.JSON(http.StatusInternalServerError, err.Error())
+	}
+
+	c.Logger().Infof("Returning %d queues", len(queues))
+	return c.JSON(http.StatusOK, queues)
 }

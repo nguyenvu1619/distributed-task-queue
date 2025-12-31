@@ -8,14 +8,15 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	elog "github.com/labstack/gommon/log"
 	_ "github.com/lib/pq"
 	echoSwagger "github.com/swaggo/echo-swagger"
 
 	"distributed-task-queue/internal/migration"
 	postgresRepo "distributed-task-queue/internal/repository/postgresql"
 	"distributed-task-queue/internal/rest"
-	job "distributed-task-queue/services"
-	queue "distributed-task-queue/services"
+	"distributed-task-queue/services/job"
+	"distributed-task-queue/services/queue"
 
 	"github.com/joho/godotenv"
 )
@@ -67,6 +68,7 @@ func main() {
 	// prepare echo
 
 	e := echo.New()
+	e.Logger.SetLevel(elog.DEBUG)
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
@@ -74,12 +76,12 @@ func main() {
 	e.GET("/swagger/*", echoSwagger.WrapHandler)
 
 	// Prepare Repository
-	queueRepo := *postgresRepo.NewQueueRepository(dbConn)
+	queueRepo := *postgresRepo.NewQueueRepository(dbConn, e.Logger)
 	jobRepo := *postgresRepo.NewJobRepository(dbConn)
 
 	// Build service Layer
 	queueSvc := queue.NewQueueService(queueRepo)
-	jobSvc := job.NewJobService(jobRepo)
+	jobSvc := job.NewJobService(jobRepo, queueRepo)
 	rest.NewQueueHandler(e, *queueSvc)
 	rest.NewJobHandler(e, *jobSvc)
 
