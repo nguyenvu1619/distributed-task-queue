@@ -14,3 +14,14 @@ type Queue struct {
 	CreatedAt time.Time `json:"created_at" example:"2024-01-01T00:00:00Z"`
 	UpdatedAt time.Time `json:"updated_at" example:"2024-01-01T00:00:00Z"`
 }
+
+// QueuePermit represents a permit slot for a queue
+// @Description Permit slot information for queue concurrency control
+type QueuePermit struct {
+	QueueID        int64      `json:"queue_id" example:"1"`
+	Slot           int        `json:"slot" example:"0"`
+	LeaseToken     *string    `json:"lease_token,omitempty" example:"550e8400-e29b-41d4-a716-446655440000"`
+	LeasedBy       *string    `json:"leased_by,omitempty" example:"worker-123"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty" example:"2024-01-01T00:00:00Z"`
+	UpdatedAt      time.Time  `json:"updated_at" example:"2024-01-01T00:00:00Z"`
+}

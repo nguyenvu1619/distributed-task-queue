@@ -75,7 +75,7 @@ type Job struct {
 	CreatedAt      time.Time  `json:"created_at" example:"2024-01-01T00:00:00Z"`
 	UpdatedAt      time.Time  `json:"updated_at" example:"2024-01-01T00:00:00Z"`
 	CompletedAt    *time.Time `json:"completed_at,omitempty" example:"2024-01-01T00:00:00Z"`
-	LeaseExpiredAt *time.Time `json:"lease_expired_at,omitempty" example:"2024-01-01T00:00:00Z"`
+	LeaseExpiredAt *time.Time `json:"lease_expires_at,omitempty" example:"2024-01-01T00:00:00Z"`
 	QueueId        int64      `json:"queue_id" example:"1"`
-	LockToken      int64      `json:"lock_token"`
+	LockToken      int64      `json:"lease_token"`
 }
