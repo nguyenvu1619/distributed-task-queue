@@ -29,16 +29,20 @@ func (s *JobService) PullJobs(status domain.JobStatus, limit int) ([]domain.Job,
 	return s.jobRepo.PullJobs(status, limit)
 }
 
-func (s *JobService) ProcessJob(queueID int64) (domain.Job, error) {
+func (s *JobService) PullJob(queueID int64) (*domain.Job, error) {
 	queue, err := s.queueRepo.GetByID(queueID)
 	if err != nil {
-		return domain.Job{}, err
+		return nil, err
 	}
-	return s.jobRepo.ProcessJob(queue)
+	return s.jobRepo.PullJob(queue)
 }
 
-func (s *JobService) CompleteJob(id int64, lockToken int64, queueID int64) (domain.Job, error) {
-	queue, err := s.queueRepo.GetByID(queueID)
+func (s *JobService) CompleteJob(id int64, lockToken int64) (domain.Job, error) {
+	fetchedJob, fetchedJobErr := s.jobRepo.GetByID(id)
+	if fetchedJobErr != nil {
+		return domain.Job{}, fetchedJobErr
+	}
+	queue, err := s.queueRepo.GetByID(fetchedJob.QueueId)
 	if err != nil {
 		return domain.Job{}, err
 	}

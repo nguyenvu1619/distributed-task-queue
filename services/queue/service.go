@@ -13,8 +13,8 @@ func NewQueueService(queueRepo postgresql.QueueRepository) *QueueService {
 	return &QueueService{queueRepo: queueRepo}
 }
 
-func (s *QueueService) CreateQueue(queue domain.Queue) (domain.Queue, error) {
-	return s.queueRepo.CreateQueue(queue)
+func (s *QueueService) CreateQueue(queue domain.Queue, concurrency int) (domain.Queue, error) {
+	return s.queueRepo.CreateQueue(queue, concurrency)
 }
 
 func (s *QueueService) GetQueue(id int64) (domain.Queue, error) {

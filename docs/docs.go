@@ -9,7 +9,16 @@ const docTemplate = `{
     "info": {
         "description": "{{escape .Description}}",
         "title": "{{.Title}}",
-        "contact": {},
+        "termsOfService": "http://swagger.io/terms/",
+        "contact": {
+            "name": "API Support",
+            "url": "http://www.swagger.io/support",
+            "email": "support@swagger.io"
+        },
+        "license": {
+            "name": "Apache 2.0",
+            "url": "http://www.apache.org/licenses/LICENSE-2.0.html"
+        },
         "version": "{{.Version}}"
     },
     "host": "{{.Host}}",
@@ -91,7 +100,148 @@ const docTemplate = `{
                 }
             }
         },
+        "/jobs/process": {
+            "post": {
+                "description": "Process and lock a job from the specified queue",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "jobs"
+                ],
+                "summary": "Process a job from queue",
+                "parameters": [
+                    {
+                        "description": "Process Job Request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/rest.ProcessJobRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/domain.Job"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/jobs/{id}/complete": {
+            "post": {
+                "description": "Mark a job as completed using its ID, lock token, and queue ID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "jobs"
+                ],
+                "summary": "Complete a job",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Job ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Complete Job Request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/rest.CompleteJobRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/domain.Job"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/queues": {
+            "get": {
+                "description": "Retrieve all queues",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "queues"
+                ],
+                "summary": "Get all queues",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/domain.Queue"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
             "post": {
                 "description": "Create a new queue with specified configuration",
                 "consumes": [
@@ -211,6 +361,13 @@ const docTemplate = `{
                     "type": "string",
                     "example": "unique-key-123"
                 },
+                "lease_expires_at": {
+                    "type": "string",
+                    "example": "2024-01-01T00:00:00Z"
+                },
+                "lease_token": {
+                    "type": "integer"
+                },
                 "metadata": {
                     "$ref": "#/definitions/domain.Metadata"
                 },
@@ -301,18 +458,40 @@ const docTemplate = `{
                     "example": "2024-01-01T00:00:00Z"
                 }
             }
+        },
+        "rest.CompleteJobRequest": {
+            "type": "object",
+            "properties": {
+                "lease_token": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "queue_id": {
+                    "type": "integer",
+                    "example": 1
+                }
+            }
+        },
+        "rest.ProcessJobRequest": {
+            "type": "object",
+            "properties": {
+                "queue_id": {
+                    "type": "integer",
+                    "example": 1
+                }
+            }
         }
     }
 }`
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "",
-	Host:             "",
-	BasePath:         "",
-	Schemes:          []string{},
-	Title:            "",
-	Description:      "",
+	Version:          "1.0",
+	Host:             "localhost:9090",
+	BasePath:         "/",
+	Schemes:          []string{"http", "https"},
+	Title:            "Distributed Task Queue API",
+	Description:      "This is a distributed task queue API server built with Go and Echo framework.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

@@ -8,10 +8,17 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	_ "github.com/lib/pq"
 )
 
-// RunMigrations runs all pending migrations
-func RunMigrations(db *sql.DB, migrationsPath string) error {
+// RunMigrations runs all pending migrations using database/sql
+func RunMigrations(connectionString string, migrationsPath string) error {
+	db, err := sql.Open("postgres", connectionString)
+	if err != nil {
+		return fmt.Errorf("failed to open database connection: %w", err)
+	}
+	defer db.Close()
+
 	driver, err := postgres.WithInstance(db, &postgres.Config{})
 	if err != nil {
 		return fmt.Errorf("failed to create postgres driver: %w", err)

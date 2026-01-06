@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -100,23 +101,24 @@ func (a *JobHandler) ProcessJob(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, "queue_id is required")
 	}
 
-	job, err := a.Service.ProcessJob(req.QueueID)
+	job, err := a.Service.PullJob(req.QueueID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, err.Error())
 	}
-
+	if job == nil {
+		return c.JSON(http.StatusOK, nil)
+	}
 	return c.JSON(http.StatusOK, job)
 }
 
 // CompleteJobRequest represents the request body for completing a job
 type CompleteJobRequest struct {
-	LockToken int64 `json:"lock_token" example:"1"`
-	QueueID   int64 `json:"queue_id" example:"1"`
+	LockToken int64 `json:"lease_token" example:"1"`
 }
 
 // CompleteJob will complete a job
 // @Summary      Complete a job
-// @Description  Mark a job as completed using its ID, lock token, and queue ID
+// @Description  Mark a job as completed using its ID, lock token
 // @Tags         jobs
 // @Accept       json
 // @Produce      json
@@ -139,16 +141,13 @@ func (a *JobHandler) CompleteJob(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, err.Error())
 	}
-
+	reqBody, _ := json.Marshal(req)
+	c.Logger().Debug("CompleteJob request body: ", string(reqBody))
 	if req.LockToken == 0 {
-		return c.JSON(http.StatusBadRequest, "lock_token is required")
+		return c.JSON(http.StatusBadRequest, "lease_token is required")
 	}
 
-	if req.QueueID == 0 {
-		return c.JSON(http.StatusBadRequest, "queue_id is required")
-	}
-
-	job, err := a.Service.CompleteJob(id, req.LockToken, req.QueueID)
+	job, err := a.Service.CompleteJob(id, req.LockToken)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, err.Error())
 	}

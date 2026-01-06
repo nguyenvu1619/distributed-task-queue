@@ -1,15 +1,15 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"log"
 	"os"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	elog "github.com/labstack/gommon/log"
-	_ "github.com/lib/pq"
 	echoSwagger "github.com/swaggo/echo-swagger"
 
 	"distributed-task-queue/internal/migration"
@@ -17,6 +17,7 @@ import (
 	"distributed-task-queue/internal/rest"
 	"distributed-task-queue/services/job"
 	"distributed-task-queue/services/queue"
+	"distributed-task-queue/services/reaper"
 
 	"github.com/joho/godotenv"
 )
@@ -40,31 +41,30 @@ func main() {
 	dbUser := os.Getenv("DATABASE_USER")
 	dbPass := os.Getenv("DATABASE_PASS")
 	dbName := os.Getenv("DATABASE_NAME")
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", dbHost, dbPort, dbUser, dbPass, dbName)
-	dbConn, err := sql.Open(`postgres`, dsn)
+	
+	// Connection string for pgx (postgres:// format)
+	pgxDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
+	dbConn, err := pgxpool.New(context.Background(), pgxDSN)
 	if err != nil {
 		log.Fatal("failed to open connection to database", err)
 	}
-	err = dbConn.Ping()
+	err = dbConn.Ping(context.Background())
 	if err != nil {
 		log.Fatal("failed to ping database ", err)
 	}
 
-	// Run database migrations
+	// Run database migrations using database/sql
 	migrationsPath := os.Getenv("MIGRATIONS_PATH")
 	if migrationsPath == "" {
 		migrationsPath = "migrations"
 	}
-	if err := migration.RunMigrations(dbConn, migrationsPath); err != nil {
+	// Connection string for database/sql (lib/pq format)
+	sqlDSN := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", dbHost, dbPort, dbUser, dbPass, dbName)
+	if err := migration.RunMigrations(sqlDSN, migrationsPath); err != nil {
 		log.Fatal("failed to run migrations: ", err)
 	}
 
-	defer func() {
-		err := dbConn.Close()
-		if err != nil {
-			log.Fatal("got error when closing the DB connection", err)
-		}
-	}()
+	defer dbConn.Close()
 	// prepare echo
 
 	e := echo.New()
@@ -82,6 +82,9 @@ func main() {
 	// Build service Layer
 	queueSvc := queue.NewQueueService(queueRepo)
 	jobSvc := job.NewJobService(jobRepo, queueRepo)
+	reaperSvc := reaper.NewReaperService(jobRepo, queueRepo)
+	ctx, _ := context.WithCancel(context.Background())
+	reaperSvc.Start(ctx)
 	rest.NewQueueHandler(e, *queueSvc)
 	rest.NewJobHandler(e, *jobSvc)
 

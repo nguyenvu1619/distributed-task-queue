@@ -24,7 +24,7 @@ up: dev-env dev-air             ## Startup / Spinup Docker Compose and air
 down: docker-stop               ## Stop Docker
 destroy: docker-teardown clean  ## Teardown (removes volumes, tmp files, etc...)
 
-install-deps: migrate air gotestsum tparse mockery swag ## Install Development Dependencies (localy).
+install-deps: migrate air gotestsum tparse mockery swag openapi2postmanv2 ## Install Development Dependencies (localy).
 deps: $(MIGRATE) $(AIR) $(GOTESTSUM) $(TPARSE) $(MOCKERY) $(GOLANGCI) $(SWAG) ## Checks for Global Development Dependencies.
 deps:
 	@echo "Required Tools Are Available"
@@ -110,13 +110,33 @@ image-build:
 
 swagger: $(SWAG) ## Generate Swagger documentation
 	@echo "Generating Swagger documentation..."
-	@$(SWAG) init -g app/main.go -o docs
+	@$(SWAG) init -g app/swagger.go -o docs
 	@echo "Swagger documentation generated in docs/ directory"
 
 swagger-clean: ## Clean generated Swagger documentation
 	@echo "Cleaning Swagger documentation..."
 	@rm -rf docs
 	@echo "Swagger documentation cleaned"
+
+# ~~~ Postman Collection ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+postman: swagger ## Generate Postman collection from Swagger documentation
+	@echo "Generating Postman collection..."
+	@if ! command -v npm >/dev/null 2>&1; then \
+		echo "Error: npm (Node.js) is required. Please install Node.js: https://nodejs.org/"; \
+		exit 1; \
+	fi
+	@if ! command -v openapi2postmanv2 >/dev/null 2>&1; then \
+		echo "openapi2postmanv2 not found. Installing globally..."; \
+		npm install -g openapi-to-postmanv2; \
+	fi
+	@openapi2postmanv2 -s docs/swagger.json -o postman_collection.json
+	@echo "Postman collection generated: postman_collection.json"
+
+postman-clean: ## Clean generated Postman collection
+	@echo "Cleaning Postman collection..."
+	@rm -f postman_collection.json
+	@echo "Postman collection cleaned"
 
 # ~~~ Database Migrations ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

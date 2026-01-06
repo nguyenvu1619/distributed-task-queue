@@ -113,3 +113,19 @@ bin/swag: bin
 		exit 1; \
 	fi
 	@ echo "done."
+
+# ~~ [ openapi2postmanv2 ] ~~~ https://www.npmjs.com/package/openapi-to-postmanv2 ~~~~~~~~~
+
+OPENAPI2POSTMAN := $(shell command -v openapi2postmanv2 || echo "")
+openapi2postmanv2: ## Install openapi2postmanv2 globally (Postman collection generator)
+	@if ! command -v npm >/dev/null 2>&1; then \
+		echo "Error: npm (Node.js) is required. Please install Node.js: https://nodejs.org/"; \
+		exit 1; \
+	fi
+	@if [ -z "$(OPENAPI2POSTMAN)" ]; then \
+		printf "Install openapi2postmanv2... "; \
+		npm install -g openapi-to-postmanv2; \
+		echo "done."; \
+	else \
+		echo "openapi2postmanv2 is already installed"; \
+	fi

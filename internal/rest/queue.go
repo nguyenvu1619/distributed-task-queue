@@ -16,6 +16,11 @@ type QueueHandler struct {
 	Service *queue.QueueService
 }
 
+type CreateQueueDTO struct {
+	domain.Queue
+	Concurrency int `json:"concurrency"`
+}
+
 // NewQueueHandler will initialize the queues/ resources endpoint
 func NewQueueHandler(e *echo.Echo, svc queue.QueueService) {
 	handler := &QueueHandler{
@@ -39,13 +44,13 @@ func NewQueueHandler(e *echo.Echo, svc queue.QueueService) {
 // @Router       /queues [post]
 func (a *QueueHandler) CreateQueue(c echo.Context) error {
 
-	var queue domain.Queue
+	var queue CreateQueueDTO
 	err := c.Bind(&queue)
 	if err != nil {
 		return c.JSON(http.StatusUnprocessableEntity, err.Error())
 	}
 
-	created, err := a.Service.CreateQueue(queue)
+	created, err := a.Service.CreateQueue(queue.Queue, queue.Concurrency)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, err.Error())
 	}

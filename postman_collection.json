@@ -1,24 +1,833 @@
 {
 	"info": {
-		"_postman_id": "distributed-task-queue-api",
+		"_postman_id": "debd15dc-9efa-481a-bd0f-64e910644228",
 		"name": "Distributed Task Queue API",
-		"description": "Postman collection for Distributed Task Queue API",
-		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-		"_exporter_id": "distributed-task-queue"
+		"description": "This is a distributed task queue API server built with Go and Echo framework.\n\nContact Support:\n Name: API Support\n Email: support@swagger.io",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"item": [
 		{
-			"name": "Queues",
+			"name": "Jobs",
 			"item": [
 				{
-					"name": "Create Queue",
+					"name": "Pull pending jobs",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/jobs",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"jobs"
+							]
+						},
+						"description": "Retrieve pending jobs from the queue"
+					},
+					"response": [
+						{
+							"name": "Success",
+							"originalRequest": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{baseUrl}}/jobs",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs"
+									]
+								}
+							},
+							"status": "OK",
+							"code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "[\n  {\n    \"id\": 1,\n    \"idempotency_key\": \"unique-key-123\",\n    \"payload\": \"{\\\"task\\\": \\\"data\\\"}\",\n    \"status\": \"PENDING\",\n    \"group_id\": \"group-123\",\n    \"attempts\": 0,\n    \"metadata\": {\n      \"consumer_id\": \"consumer-123\",\n      \"last_pull_at\": \"2024-01-01T00:00:00Z\"\n    },\n    \"created_at\": \"2024-01-01T00:00:00Z\",\n    \"updated_at\": \"2024-01-01T00:00:00Z\",\n    \"completed_at\": null,\n    \"lease_expires_at\": null,\n    \"queue_id\": 1,\n    \"lease_token\": 0\n  }\n]"
+						},
+						{
+							"name": "Internal Server Error",
+							"originalRequest": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{baseUrl}}/jobs",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs"
+									]
+								}
+							},
+							"status": "Internal Server Error",
+							"code": 500,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Internal server error occurred"
+						}
+					]
+				},
+				{
+					"name": "Publish a new job",
 					"request": {
 						"method": "POST",
 						"header": [
 							{
 								"key": "Content-Type",
-								"value": "application/json",
-								"type": "text"
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"idempotency_key\": \"unique-key-123\",\n  \"payload\": \"{\\\"task\\\": \\\"process payment\\\", \\\"amount\\\": 100.50}\",\n  \"status\": \"PENDING\",\n  \"group_id\": \"group-123\",\n  \"queue_id\": 1\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/jobs",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"jobs"
+							]
+						},
+						"description": "Create and publish a new job to the queue"
+					},
+					"response": [
+						{
+							"name": "Success",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"idempotency_key\": \"unique-key-123\",\n  \"payload\": \"{\\\"task\\\": \\\"process payment\\\", \\\"amount\\\": 100.50}\",\n  \"status\": \"PENDING\",\n  \"group_id\": \"group-123\",\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs"
+									]
+								}
+							},
+							"status": "OK",
+							"code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "{\n  \"id\": 1,\n  \"idempotency_key\": \"unique-key-123\",\n  \"payload\": \"{\\\"task\\\": \\\"process payment\\\", \\\"amount\\\": 100.50}\",\n  \"status\": \"PENDING\",\n  \"group_id\": \"group-123\",\n  \"attempts\": 0,\n  \"metadata\": {\n    \"consumer_id\": \"\",\n    \"last_pull_at\": \"0001-01-01T00:00:00Z\"\n  },\n  \"created_at\": \"2024-01-01T12:00:00Z\",\n  \"updated_at\": \"2024-01-01T12:00:00Z\",\n  \"completed_at\": null,\n  \"lease_expires_at\": null,\n  \"queue_id\": 1,\n  \"lease_token\": 0\n}"
+						},
+						{
+							"name": "Unprocessable Entity",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"invalid\": \"data\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs"
+									]
+								}
+							},
+							"status": "Unprocessable Entity",
+							"code": 422,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Invalid request body format"
+						},
+						{
+							"name": "Internal Server Error",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"idempotency_key\": \"unique-key-123\",\n  \"payload\": \"{\\\"task\\\": \\\"data\\\"}\",\n  \"status\": \"PENDING\",\n  \"group_id\": \"group-123\",\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs"
+									]
+								}
+							},
+							"status": "Internal Server Error",
+							"code": 500,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Internal server error occurred"
+						}
+					]
+				},
+				{
+					"name": "Process a job from queue",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"queue_id\": 1\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/jobs/process",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"jobs",
+								"process"
+							]
+						},
+						"description": "Process and lock a job from the specified queue"
+					},
+					"response": [
+						{
+							"name": "Success",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/process",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"process"
+									]
+								}
+							},
+							"status": "OK",
+							"code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "{\n  \"id\": 1,\n  \"idempotency_key\": \"unique-key-123\",\n  \"payload\": \"{\\\"task\\\": \\\"process payment\\\", \\\"amount\\\": 100.50}\",\n  \"status\": \"PROCESSING\",\n  \"group_id\": \"group-123\",\n  \"attempts\": 1,\n  \"metadata\": {\n    \"consumer_id\": \"worker-001\",\n    \"last_pull_at\": \"2024-01-01T12:00:00Z\"\n  },\n  \"created_at\": \"2024-01-01T12:00:00Z\",\n  \"updated_at\": \"2024-01-01T12:05:00Z\",\n  \"completed_at\": null,\n  \"lease_expires_at\": \"2024-01-01T12:05:30Z\",\n  \"queue_id\": 1,\n  \"lease_token\": 1234567890\n}"
+						},
+						{
+							"name": "Bad Request",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"queue_id\": 0\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/process",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"process"
+									]
+								}
+							},
+							"status": "Bad Request",
+							"code": 400,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "queue_id is required"
+						},
+						{
+							"name": "Not Found",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"queue_id\": 999\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/process",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"process"
+									]
+								}
+							},
+							"status": "Not Found",
+							"code": 404,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "No pending jobs found in queue"
+						},
+						{
+							"name": "Internal Server Error",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/process",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"process"
+									]
+								}
+							},
+							"status": "Internal Server Error",
+							"code": 500,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Internal server error occurred"
+						}
+					]
+				},
+				{
+					"name": "Complete a job",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"lease_token\": 1234567890,\n  \"queue_id\": 1\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/jobs/1/complete",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"jobs",
+								"1",
+								"complete"
+							]
+						},
+						"description": "Mark a job as completed using its ID, lock token, and queue ID"
+					},
+					"response": [
+						{
+							"name": "Success",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"lease_token\": 1234567890,\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/1/complete",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"1",
+										"complete"
+									]
+								}
+							},
+							"status": "OK",
+							"code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "{\n  \"id\": 1,\n  \"idempotency_key\": \"unique-key-123\",\n  \"payload\": \"{\\\"task\\\": \\\"process payment\\\", \\\"amount\\\": 100.50}\",\n  \"status\": \"COMPLETED\",\n  \"group_id\": \"group-123\",\n  \"attempts\": 1,\n  \"metadata\": {\n    \"consumer_id\": \"worker-001\",\n    \"last_pull_at\": \"2024-01-01T12:00:00Z\"\n  },\n  \"created_at\": \"2024-01-01T12:00:00Z\",\n  \"updated_at\": \"2024-01-01T12:10:00Z\",\n  \"completed_at\": \"2024-01-01T12:10:00Z\",\n  \"lease_expires_at\": null,\n  \"queue_id\": 1,\n  \"lease_token\": 0\n}"
+						},
+						{
+							"name": "Bad Request - Missing lease_token",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"lease_token\": 0,\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/1/complete",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"1",
+										"complete"
+									]
+								}
+							},
+							"status": "Bad Request",
+							"code": 400,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "lease_token is required"
+						},
+						{
+							"name": "Bad Request - Missing queue_id",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"lease_token\": 1234567890,\n  \"queue_id\": 0\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/1/complete",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"1",
+										"complete"
+									]
+								}
+							},
+							"status": "Bad Request",
+							"code": 400,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "queue_id is required"
+						},
+						{
+							"name": "Bad Request - Invalid job id",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"lease_token\": 1234567890,\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/invalid/complete",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"invalid",
+										"complete"
+									]
+								}
+							},
+							"status": "Bad Request",
+							"code": 400,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "invalid job id"
+						},
+						{
+							"name": "Not Found",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"lease_token\": 1234567890,\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/999/complete",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"999",
+										"complete"
+									]
+								}
+							},
+							"status": "Not Found",
+							"code": 404,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Job not found"
+						},
+						{
+							"name": "Internal Server Error",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"lease_token\": 1234567890,\n  \"queue_id\": 1\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/jobs/1/complete",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"jobs",
+										"1",
+										"complete"
+									]
+								}
+							},
+							"status": "Internal Server Error",
+							"code": 500,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Internal server error occurred"
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Queues",
+			"item": [
+				{
+					"name": "Get all queues",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/queues",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"queues"
+							]
+						},
+						"description": "Retrieve all queues"
+					},
+					"response": [
+						{
+							"name": "Success",
+							"originalRequest": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{baseUrl}}/queues",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"queues"
+									]
+								}
+							},
+							"status": "OK",
+							"code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "[\n  {\n    \"id\": 1,\n    \"name\": \"default-queue\",\n    \"max_attempts\": 3,\n    \"lease_duration\": \"30s\",\n    \"created_at\": \"2024-01-01T00:00:00Z\",\n    \"updated_at\": \"2024-01-01T00:00:00Z\"\n  },\n  {\n    \"id\": 2,\n    \"name\": \"priority-queue\",\n    \"max_attempts\": 5,\n    \"lease_duration\": \"1m\",\n    \"created_at\": \"2024-01-01T01:00:00Z\",\n    \"updated_at\": \"2024-01-01T01:00:00Z\"\n  }\n]"
+						},
+						{
+							"name": "Internal Server Error",
+							"originalRequest": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{baseUrl}}/queues",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"queues"
+									]
+								}
+							},
+							"status": "Internal Server Error",
+							"code": 500,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Internal server error occurred"
+						}
+					]
+				},
+				{
+					"name": "Create a new queue",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
 							}
 						],
 						"body": {
@@ -31,9 +840,9 @@
 							}
 						},
 						"url": {
-							"raw": "{{base_url}}/queues",
+							"raw": "{{baseUrl}}/queues",
 							"host": [
-								"{{base_url}}"
+								"{{baseUrl}}"
 							],
 							"path": [
 								"queues"
@@ -41,98 +850,241 @@
 						},
 						"description": "Create a new queue with specified configuration"
 					},
-					"response": []
+					"response": [
+						{
+							"name": "Success",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"name\": \"default-queue\",\n  \"max_attempts\": 3,\n  \"lease_duration\": \"30s\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/queues",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"queues"
+									]
+								}
+							},
+							"status": "OK",
+							"code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "{\n  \"id\": 1,\n  \"name\": \"default-queue\",\n  \"max_attempts\": 3,\n  \"lease_duration\": \"30s\",\n  \"created_at\": \"2024-01-01T12:00:00Z\",\n  \"updated_at\": \"2024-01-01T12:00:00Z\"\n}"
+						},
+						{
+							"name": "Unprocessable Entity",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"invalid\": \"data\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/queues",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"queues"
+									]
+								}
+							},
+							"status": "Unprocessable Entity",
+							"code": 422,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Invalid request body format"
+						},
+						{
+							"name": "Internal Server Error",
+							"originalRequest": {
+								"method": "POST",
+								"header": [
+									{
+										"key": "Content-Type",
+										"value": "application/json"
+									}
+								],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"name\": \"default-queue\",\n  \"max_attempts\": 3,\n  \"lease_duration\": \"30s\"\n}",
+									"options": {
+										"raw": {
+											"language": "json"
+										}
+									}
+								},
+								"url": {
+									"raw": "{{baseUrl}}/queues",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"queues"
+									]
+								}
+							},
+							"status": "Internal Server Error",
+							"code": 500,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Internal server error occurred"
+						}
+					]
 				},
 				{
-					"name": "Get Queue by ID",
+					"name": "Get queue by ID",
 					"request": {
 						"method": "GET",
-						"header": [],
+						"header": [
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
 						"url": {
-							"raw": "{{base_url}}/queues/:id",
+							"raw": "{{baseUrl}}/queues/1",
 							"host": [
-								"{{base_url}}"
+								"{{baseUrl}}"
 							],
 							"path": [
 								"queues",
-								":id"
-							],
-							"variable": [
-								{
-									"key": "id",
-									"value": "1",
-									"description": "Queue ID"
-								}
+								"1"
 							]
 						},
 						"description": "Retrieve a queue by its ID"
 					},
-					"response": []
-				}
-			],
-			"description": "Queue management endpoints"
-		},
-		{
-			"name": "Jobs",
-			"item": [
-				{
-					"name": "Publish Job",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json",
-								"type": "text"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"idempotency_key\": \"unique-key-123\",\n  \"payload\": \"{\\\"task\\\": \\\"process payment\\\", \\\"amount\\\": 100}\",\n  \"status\": \"PENDING\",\n  \"group_id\": \"group-123\",\n  \"queue_id\": 1\n}",
-							"options": {
-								"raw": {
-									"language": "json"
+					"response": [
+						{
+							"name": "Success",
+							"originalRequest": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{baseUrl}}/queues/1",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"queues",
+										"1"
+									]
 								}
-							}
-						},
-						"url": {
-							"raw": "{{base_url}}/jobs",
-							"host": [
-								"{{base_url}}"
+							},
+							"status": "OK",
+							"code": 200,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
 							],
-							"path": [
-								"jobs"
-							]
+							"body": "{\n  \"id\": 1,\n  \"name\": \"default-queue\",\n  \"max_attempts\": 3,\n  \"lease_duration\": \"30s\",\n  \"created_at\": \"2024-01-01T00:00:00Z\",\n  \"updated_at\": \"2024-01-01T00:00:00Z\"\n}"
 						},
-						"description": "Create and publish a new job to the queue. Note: id, created_at, updated_at, completed_at are auto-generated by the server."
-					},
-					"response": []
-				},
-				{
-					"name": "Pull Jobs",
-					"request": {
-						"method": "GET",
-						"header": [],
-						"url": {
-							"raw": "{{base_url}}/jobs",
-							"host": [
-								"{{base_url}}"
+						{
+							"name": "Not Found",
+							"originalRequest": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{baseUrl}}/queues/999",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"queues",
+										"999"
+									]
+								}
+							},
+							"status": "Not Found",
+							"code": 404,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
 							],
-							"path": [
-								"jobs"
-							]
+							"body": "Queue not found"
 						},
-						"description": "Retrieve pending jobs from the queue"
-					},
-					"response": []
+						{
+							"name": "Internal Server Error",
+							"originalRequest": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{baseUrl}}/queues/1",
+									"host": [
+										"{{baseUrl}}"
+									],
+									"path": [
+										"queues",
+										"1"
+									]
+								}
+							},
+							"status": "Internal Server Error",
+							"code": 500,
+							"_postman_previewlanguage": "json",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": "Internal server error occurred"
+						}
+					]
 				}
-			],
-			"description": "Job management endpoints"
+			]
 		}
 	],
 	"variable": [
 		{
-			"key": "base_url",
+			"key": "baseUrl",
 			"value": "http://localhost:9090",
 			"type": "string"
 		}
