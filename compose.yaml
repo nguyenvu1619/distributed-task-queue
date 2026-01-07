@@ -1,19 +1,8 @@
 version: "3.7"
 services:
-  web:
-    image: go-clean-arch
-    container_name: queue_management_api
-    ports:
-      - 9090:9090
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./config.json:/app/config.json
-
   postgres:
     image: postgres:16
-    container_name: go_clean_arch_postgres
+    container_name: distributed_task_queue_postgres
     ports:
       - 5432:5432
     environment:
@@ -25,3 +14,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

@@ -1,0 +1,34 @@
+{
+  "name": "distributed-task-queue",
+  "version": "1.0.0",
+  "description": "A lightweight TypeScript library for distributed task queue management",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "migrate:up": "ts-node src/migration/runner.ts up",
+    "migrate:down": "ts-node src/migration/runner.ts down",
+    "example:producer": "ts-node examples/producer.ts",
+    "example:worker": "ts-node examples/worker.ts"
+  },
+  "keywords": [
+    "task-queue",
+    "distributed",
+    "postgresql",
+    "job-queue"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "pg": "^8.11.3",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/pg": "^8.10.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
+
