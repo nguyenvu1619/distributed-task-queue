@@ -17,7 +17,6 @@ import (
 	"distributed-task-queue/internal/rest"
 	"distributed-task-queue/services/job"
 	"distributed-task-queue/services/queue"
-	"distributed-task-queue/services/reaper"
 
 	"github.com/joho/godotenv"
 )
@@ -41,7 +40,7 @@ func main() {
 	dbUser := os.Getenv("DATABASE_USER")
 	dbPass := os.Getenv("DATABASE_PASS")
 	dbName := os.Getenv("DATABASE_NAME")
-	
+
 	// Connection string for pgx (postgres:// format)
 	pgxDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
 	dbConn, err := pgxpool.New(context.Background(), pgxDSN)
@@ -82,9 +81,9 @@ func main() {
 	// Build service Layer
 	queueSvc := queue.NewQueueService(queueRepo)
 	jobSvc := job.NewJobService(jobRepo, queueRepo)
-	reaperSvc := reaper.NewReaperService(jobRepo, queueRepo)
-	ctx, _ := context.WithCancel(context.Background())
-	reaperSvc.Start(ctx)
+	// reaperSvc := reaper.NewReaperService(jobRepo, queueRepo)
+	// ctx, _ := context.WithCancel(context.Background())
+	// reaperSvc.Start(ctx)
 	rest.NewQueueHandler(e, *queueSvc)
 	rest.NewJobHandler(e, *jobSvc)
 
