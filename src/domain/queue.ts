@@ -1,25 +1,25 @@
 export interface Queue {
   id: number;
   name: string;
-  max_attempts: number;
-  lease_duration: number; // Duration in milliseconds
-  created_at: Date;
-  updated_at: Date;
+  maxAttempts: number;
+  leaseDuration: number; // Duration in milliseconds
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface QueuePermit {
-  queue_id: number;
+  queueId: number;
   slot: number;
-  lease_token: string | null;
-  leased_by: string | null;
-  lease_expires_at: Date | null;
-  updated_at: Date;
+  leaseToken: string | null;
+  leasedBy: string | null;
+  leaseExpiresAt: Date | null;
+  updatedAt: Date;
 }
 
 export interface CreateQueueInput {
   name: string;
-  max_attempts: number;
-  lease_duration: number; // Duration in milliseconds
+  maxAttempts: number;
+  leaseDuration: number; // Duration in milliseconds
   concurrency: number;
 }
 

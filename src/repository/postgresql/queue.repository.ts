@@ -2,6 +2,16 @@ import { Pool } from 'pg';
 import { Queue, CreateQueueInput } from '../../domain/queue';
 import { NotFoundError } from '../../domain/errors';
 
+// Database row interface (snake_case)
+interface QueueRow {
+  id: string;
+  name: string;
+  max_attempts: string;
+  lease_duration: string | number;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export class QueueRepository {
   private cache: Map<number, Queue> = new Map();
 
@@ -24,7 +34,7 @@ export class QueueRepository {
       throw new NotFoundError(`Queue with id ${id} not found`);
     }
 
-    const queue = this.mapRowToQueue(result.rows[0]);
+    const queue = this.deserializeQueue(result.rows[0] as QueueRow);
     this.cache.set(id, queue);
     return queue;
   }
@@ -34,7 +44,7 @@ export class QueueRepository {
       `SELECT id, name, max_attempts, lease_duration, created_at, updated_at FROM queue`
     );
 
-    const queues = result.rows.map((row) => this.mapRowToQueue(row));
+    const queues = result.rows.map((row) => this.deserializeQueue(row as QueueRow));
     
     // Update cache
     queues.forEach((queue) => {
@@ -51,17 +61,20 @@ export class QueueRepository {
       await client.query('BEGIN');
       await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
 
-      // Insert queue
+      // Serialize input to database format
+      const serialized = this.serializeQueueInput(input);
+      
       // Convert milliseconds to nanoseconds for storage (to match Go's time.Duration)
-      const leaseDurationNs = input.lease_duration * 1000000;
+      const leaseDurationNs = input.leaseDuration * 1000000;
+      
       const queueResult = await client.query(
         `INSERT INTO queue (name, max_attempts, lease_duration, created_at, updated_at) 
          VALUES ($1, $2, $3, now(), now()) 
          RETURNING id, name, max_attempts, lease_duration, created_at, updated_at`,
-        [input.name, input.max_attempts, leaseDurationNs]
+        [serialized.name, serialized.max_attempts, leaseDurationNs]
       );
 
-      const queue = this.mapRowToQueue(queueResult.rows[0]);
+      const queue = this.deserializeQueue(queueResult.rows[0] as QueueRow);
 
       // Insert queue permits
       const permitValues: any[] = [];
@@ -93,7 +106,10 @@ export class QueueRepository {
     }
   }
 
-  private mapRowToQueue(row: any): Queue {
+  /**
+   * Deserialize database row (snake_case) to domain model (camelCase)
+   */
+  private deserializeQueue(row: QueueRow): Queue {
     // lease_duration is stored as BIGINT (nanoseconds in Go)
     // Convert nanoseconds to milliseconds for TypeScript
     const leaseDurationNs = typeof row.lease_duration === 'string' 
@@ -104,11 +120,20 @@ export class QueueRepository {
     return {
       id: parseInt(row.id, 10),
       name: row.name,
-      max_attempts: parseInt(row.max_attempts, 10),
-      lease_duration: leaseDurationMs,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+      maxAttempts: parseInt(row.max_attempts, 10),
+      leaseDuration: leaseDurationMs,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  /**
+   * Serialize domain model (camelCase) to database format (snake_case)
+   */
+  private serializeQueueInput(input: CreateQueueInput): { name: string; max_attempts: number } {
+    return {
+      name: input.name,
+      max_attempts: input.maxAttempts,
     };
   }
 }
-

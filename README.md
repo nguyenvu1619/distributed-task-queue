@@ -81,17 +81,17 @@ const jobService = new JobService(jobRepo, queueRepo);
 // Create a queue (if not exists)
 const queue = await queueService.createQueue({
   name: 'my-queue',
-  max_attempts: 3,
-  lease_duration: 30000, // 30 seconds in milliseconds
+  maxAttempts: 3,
+  leaseDuration: 30000, // 30 seconds in milliseconds
   concurrency: 10, // 10 concurrent workers
 });
 
 // Publish a job
 const job = await jobService.publishJob({
-  idempotency_key: 'unique-job-key-123',
+  idempotencyKey: 'unique-job-key-123',
   payload: JSON.stringify({ task: 'process-data', data: { id: 1 } }),
-  queue_id: queue.id,
-  group_id: 'group-123',
+  queueId: queue.id,
+  groupId: 'group-123',
 });
 ```
 
@@ -111,8 +111,10 @@ const pool = createPool({
   database: process.env.DATABASE_NAME || 'queue',
 });
 
-const queueService = new QueueService(new QueueRepository(pool));
-const jobService = new JobService(new JobRepository(pool), queueService);
+const jobRepo = new JobRepository(pool);
+const queueRepo = new QueueRepository(pool);
+const queueService = new QueueService(queueRepo);
+const jobService = new JobService(jobRepo, queueRepo);
 
 // Worker loop
 async function workerLoop(queueId: number) {
@@ -136,12 +138,12 @@ async function workerLoop(queueId: number) {
         await processJob(payload);
 
         // Mark job as completed
-        await jobService.completeJob(job.id, job.lock_token);
+        await jobService.completeJob(job.id, job.lockToken);
         console.log('Job completed:', job.id);
       } catch (error) {
         console.error('Job processing failed:', error);
         // Mark job as failed
-        await jobService.failJob(job.id, job.lock_token);
+        await jobService.failJob(job.id, job.lockToken);
       }
     } catch (error) {
       console.error('Worker error:', error);

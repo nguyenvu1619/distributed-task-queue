@@ -45,13 +45,13 @@ async function workerLoop(queueId: number) {
         await processJob(payload);
 
         // Mark job as completed
-        await jobService.completeJob(job.id, job.lock_token);
+        await jobService.completeJob(job.id, job.lockToken);
         console.log(`[Worker] Job ${job.id} completed`);
       } catch (error) {
         console.error(`[Worker] Job ${job.id} processing failed:`, error);
         // Mark job as failed
         try {
-          await jobService.failJob(job.id, job.lock_token);
+          await jobService.failJob(job.id, job.lockToken);
           console.log(`[Worker] Job ${job.id} marked as failed`);
         } catch (failError) {
           console.error(`[Worker] Failed to mark job ${job.id} as failed:`, failError);

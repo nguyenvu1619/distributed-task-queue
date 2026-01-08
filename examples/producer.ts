@@ -29,8 +29,8 @@ async function main() {
       console.log('Creating new queue...');
       queue = await queueService.createQueue({
         name: 'example-queue',
-        max_attempts: 3,
-        lease_duration: 30000, // 30 seconds in milliseconds
+        maxAttempts: 3,
+        leaseDuration: 30000, // 30 seconds in milliseconds
         concurrency: 10,
       });
       console.log('Queue created:', queue);
@@ -38,15 +38,15 @@ async function main() {
 
     // Publish a job
     const job = await jobService.publishJob({
-      idempotency_key: `job-${Date.now()}`,
+      idempotencyKey: `job-${Date.now()}`,
       payload: JSON.stringify({
         task: 'process-data',
         data: { userId: 123, action: 'send-email' },
       }),
-      queue_id: queue.id,
-      group_id: 'group-123',
+      queueId: queue.id,
+      groupId: 'group-123',
       metadata: {
-        consumer_id: 'producer-1',
+        consumerId: 'producer-1',
       },
     });
 

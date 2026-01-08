@@ -3,6 +3,23 @@ import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
 import { Queue } from '../../domain/queue';
 import { NotFoundError } from '../../domain/errors';
 
+// Database row interface (snake_case)
+interface JobRow {
+  id: string;
+  idempotency_key: string;
+  payload: string;
+  status: string;
+  group_id: string;
+  queue_id: string;
+  attempts: string;
+  metadata: any;
+  created_at: Date;
+  updated_at: Date;
+  completed_at: Date | null;
+  lease_token: string | null;
+  lease_expires_at: Date | null;
+}
+
 export class JobRepository {
   constructor(private pool: Pool) {}
 
@@ -18,7 +35,7 @@ export class JobRepository {
       throw new NotFoundError(`Job with id ${id} not found`);
     }
 
-    return this.mapRowToJob(result.rows[0]);
+    return this.deserializeJob(result.rows[0] as JobRow);
   }
 
   async publishJob(input: CreateJobInput): Promise<Job> {
@@ -31,17 +48,17 @@ export class JobRepository {
        RETURNING id, idempotency_key, payload, status, group_id, queue_id, attempts, 
        metadata, created_at, updated_at, completed_at, lease_token, lease_expires_at`,
       [
-        input.idempotency_key,
+        input.idempotencyKey,
         input.payload,
         JobStatus.PENDING,
-        input.group_id,
-        input.queue_id,
+        input.groupId,
+        input.queueId,
         attempts,
         JSON.stringify(metadata),
       ]
     );
 
-    return this.mapRowToJob(result.rows[0]);
+    return this.deserializeJob(result.rows[0] as JobRow);
   }
 
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {
@@ -52,7 +69,7 @@ export class JobRepository {
       [status, limit]
     );
 
-    return result.rows.map((row) => this.mapRowToJob(row));
+    return result.rows.map((row) => this.deserializeJob(row as JobRow));
   }
 
   async pullJob(queue: Queue): Promise<Job | null> {
@@ -76,12 +93,11 @@ export class JobRepository {
         return null;
       }
 
-      const job = this.mapRowToJob(selectResult.rows[0]);
+      const job = this.deserializeJob(selectResult.rows[0] as JobRow);
       const newLockToken = (job.lockToken || 0) + 1;
 
-      // Convert lease_duration from milliseconds to PostgreSQL interval
-      // queue.lease_duration is in milliseconds, convert to interval string
-      const leaseDurationMs = queue.lease_duration;
+      // Convert leaseDuration from milliseconds to PostgreSQL interval
+      const leaseDurationMs = queue.leaseDuration;
       const leaseDurationSeconds = Math.floor(leaseDurationMs / 1000);
       const intervalStr = leaseDurationSeconds >= 60 
         ? `${Math.floor(leaseDurationSeconds / 60)} minutes ${leaseDurationSeconds % 60} seconds`
@@ -98,7 +114,7 @@ export class JobRepository {
 
       return {
         ...job,
-        lock_token: newLockToken,
+        lockToken: newLockToken,
         status: JobStatus.PROCESSING,
       };
     } catch (error) {
@@ -122,7 +138,7 @@ export class JobRepository {
       throw new NotFoundError(`Job with id ${id} and lock_token ${lockToken} not found or not in PROCESSING status`);
     }
 
-    return this.mapRowToJob(result.rows[0]);
+    return this.deserializeJob(result.rows[0] as JobRow);
   }
 
   async failJob(id: number, lockToken: number, queue: Queue): Promise<Job> {
@@ -138,7 +154,7 @@ export class JobRepository {
       throw new NotFoundError(`Job with id ${id} and lock_token ${lockToken} not found or not in PROCESSING status`);
     }
 
-    return this.mapRowToJob(result.rows[0]);
+    return this.deserializeJob(result.rows[0] as JobRow);
   }
 
   async recoverJobs(): Promise<number[]> {
@@ -176,7 +192,10 @@ export class JobRepository {
     }
   }
 
-  private mapRowToJob(row: any): Job {
+  /**
+   * Deserialize database row (snake_case) to domain model (camelCase)
+   */
+  private deserializeJob(row: JobRow): Job {
     let metadata: Metadata = {};
     if (row.metadata) {
       if (typeof row.metadata === 'string') {
@@ -186,21 +205,66 @@ export class JobRepository {
       }
     }
 
+    // Convert snake_case metadata keys to camelCase if needed
+    if (metadata.consumer_id !== undefined) {
+      metadata.consumerId = metadata.consumer_id;
+      delete metadata.consumer_id;
+    }
+    if (metadata.last_pull_at !== undefined) {
+      metadata.lastPullAt = metadata.last_pull_at;
+      delete metadata.last_pull_at;
+    }
+
     return {
       id: parseInt(row.id, 10),
-      idempotency_key: row.idempotency_key,
+      idempotencyKey: row.idempotency_key,
       payload: row.payload,
       status: row.status as JobStatus,
-      group_id: row.group_id,
-      queue_id: parseInt(row.queue_id, 10),
+      groupId: row.group_id,
+      queueId: parseInt(row.queue_id, 10),
       attempts: parseInt(row.attempts, 10),
       metadata: metadata,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      completed_at: row.completed_at,
-      lease_expires_at: row.lease_expires_at,
-      lock_token: row.lease_token ? parseInt(row.lease_token, 10) : 0,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      completedAt: row.completed_at,
+      leaseExpiresAt: row.lease_expires_at,
+      lockToken: row.lease_token ? parseInt(row.lease_token, 10) : 0,
     };
   }
-}
 
+  /**
+   * Serialize domain model (camelCase) to database format (snake_case)
+   * Used when inserting/updating jobs
+   */
+  private serializeJob(job: Partial<Job>): Partial<JobRow> {
+    const serialized: any = {};
+    
+    if (job.id !== undefined) serialized.id = job.id.toString();
+    if (job.idempotencyKey !== undefined) serialized.idempotency_key = job.idempotencyKey;
+    if (job.payload !== undefined) serialized.payload = job.payload;
+    if (job.status !== undefined) serialized.status = job.status;
+    if (job.groupId !== undefined) serialized.group_id = job.groupId;
+    if (job.queueId !== undefined) serialized.queue_id = job.queueId.toString();
+    if (job.attempts !== undefined) serialized.attempts = job.attempts.toString();
+    if (job.metadata !== undefined) {
+      // Convert camelCase metadata keys to snake_case if needed
+      const metadataCopy = { ...job.metadata };
+      if (metadataCopy.consumerId !== undefined) {
+        metadataCopy.consumer_id = metadataCopy.consumerId;
+        delete metadataCopy.consumerId;
+      }
+      if (metadataCopy.lastPullAt !== undefined) {
+        metadataCopy.last_pull_at = metadataCopy.lastPullAt;
+        delete metadataCopy.lastPullAt;
+      }
+      serialized.metadata = JSON.stringify(metadataCopy);
+    }
+    if (job.createdAt !== undefined) serialized.created_at = job.createdAt;
+    if (job.updatedAt !== undefined) serialized.updated_at = job.updatedAt;
+    if (job.completedAt !== undefined) serialized.completed_at = job.completedAt;
+    if (job.leaseExpiresAt !== undefined) serialized.lease_expires_at = job.leaseExpiresAt;
+    if (job.lockToken !== undefined) serialized.lease_token = job.lockToken.toString();
+
+    return serialized;
+  }
+}

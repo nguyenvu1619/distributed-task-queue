@@ -27,13 +27,13 @@ export class JobService {
 
   async completeJob(id: number, lockToken: number): Promise<Job> {
     const job = await this.jobRepo.getById(id);
-    const queue = await this.queueRepo.getById(job.queue_id);
+    const queue = await this.queueRepo.getById(job.queueId);
     return this.jobRepo.completeJob(id, lockToken, queue);
   }
 
   async failJob(id: number, lockToken: number): Promise<Job> {
     const job = await this.jobRepo.getById(id);
-    const queue = await this.queueRepo.getById(job.queue_id);
+    const queue = await this.queueRepo.getById(job.queueId);
     return this.jobRepo.failJob(id, lockToken, queue);
   }
 }
