@@ -6,10 +6,12 @@ A lightweight TypeScript library for distributed task queue management using Pos
 
 - **Job Management**: Publish, pull, complete, and fail jobs
 - **Queue Management**: Create and manage queues with configurable concurrency
+- **Dual Strategy Performance**: Fast path (~3-5ms latency) for simple queues, full coordination path for complex scenarios
 - **Job Leasing**: Automatic job locking with expiration to prevent duplicate processing
 - **Job Recovery**: Reaper service to recover expired jobs
 - **TypeScript**: Full TypeScript support with type safety
 - **Lightweight**: Minimal dependencies (only `pg` and `dotenv`)
+- **High Performance**: Optimized for low latency, approaching Graphile Worker's performance benchmarks
 
 ## Installation
 
@@ -84,6 +86,7 @@ const queue = await queueService.createQueue({
   maxAttempts: 3,
   leaseDuration: 30000, // 30 seconds in milliseconds
   concurrency: 10, // 10 concurrent workers
+  requiresGroupId: false, // Use fast path for maximum performance (~3-5ms latency)
 });
 
 // Publish a job
@@ -138,12 +141,12 @@ async function workerLoop(queueId: number) {
         await processJob(payload);
 
         // Mark job as completed
-        await jobService.completeJob(job.id, job.lockToken);
+        await jobService.completeJob(job.id, job.lockSeq);
         console.log('Job completed:', job.id);
       } catch (error) {
         console.error('Job processing failed:', error);
         // Mark job as failed
-        await jobService.failJob(job.id, job.lockToken);
+        await jobService.failJob(job.id, job.lockSeq);
       }
     } catch (error) {
       console.error('Worker error:', error);
@@ -194,10 +197,10 @@ Publishes a new job to the queue.
 #### `pullJob(queueId: number): Promise<Job | null>`
 Pulls and locks a job from the specified queue. Returns `null` if no jobs are available.
 
-#### `completeJob(id: number, lockToken: number): Promise<Job>`
+#### `completeJob(id: number, lockSeq: number): Promise<Job>`
 Marks a job as completed. Requires the correct lock token.
 
-#### `failJob(id: number, lockToken: number): Promise<Job>`
+#### `failJob(id: number, lockSeq: number): Promise<Job>`
 Marks a job as failed. Requires the correct lock token.
 
 #### `getJob(id: number): Promise<Job>`
@@ -288,6 +291,54 @@ Or rollback specific number of migrations:
 ```bash
 ts-node src/migration/runner.ts down 1
 ```
+
+## Performance Testing
+
+The library includes comprehensive performance testing tools to benchmark throughput, latency, and concurrency handling.
+
+### Quick Performance Test
+
+Run the default test (10,000 jobs, 100 workers):
+
+```bash
+npm run perf:test
+```
+
+### Predefined Test Scenarios
+
+```bash
+# Small test (1,000 jobs, 10 workers)
+npm run perf:small
+
+# Medium test (5,000 jobs, 50 workers)
+npm run perf:medium
+
+# Large test (10,000 jobs, 100 workers)
+npm run perf:large
+
+# Extreme test (50,000 jobs, 200 workers)
+npm run perf:extreme
+```
+
+### Custom Configuration
+
+```bash
+NUM_JOBS=10000 \
+NUM_WORKERS=100 \
+QUEUE_CONCURRENCY=1000 \
+JOB_PROCESSING_TIME_MS=0 \
+npm run perf:test
+```
+
+### Performance Metrics
+
+The test measures:
+- **Throughput**: Jobs processed per second
+- **Latency**: P50, P95, P99 percentiles
+- **Success Rate**: Percentage of completed jobs
+- **Worker Distribution**: Load balancing across workers
+
+For detailed performance testing documentation, see [examples/PERFORMANCE_TESTING.md](examples/PERFORMANCE_TESTING.md).
 
 ## Development
 

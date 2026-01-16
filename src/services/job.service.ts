@@ -22,19 +22,20 @@ export class JobService {
 
   async pullJob(queueId: number): Promise<Job | null> {
     const queue = await this.queueRepo.getById(queueId);
-    return this.jobRepo.pullJob(queue);
+    const job = await this.jobRepo.pullJob(queue);
+    return job;
   }
 
-  async completeJob(id: number, lockToken: number): Promise<Job> {
+  async completeJob(id: number, lockSeq: number): Promise<Job> {
     const job = await this.jobRepo.getById(id);
     const queue = await this.queueRepo.getById(job.queueId);
-    return this.jobRepo.completeJob(id, lockToken, queue);
+    return this.jobRepo.completeJob(id, lockSeq, queue);
   }
 
-  async failJob(id: number, lockToken: number): Promise<Job> {
+  async failJob(id: number, lockSeq: number): Promise<Job> {
     const job = await this.jobRepo.getById(id);
     const queue = await this.queueRepo.getById(job.queueId);
-    return this.jobRepo.failJob(id, lockToken, queue);
+    return this.jobRepo.failJob(id, lockSeq, queue);
   }
 }
 
