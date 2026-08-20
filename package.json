@@ -17,7 +17,7 @@
     "perf:large": "NUM_JOBS=10000 NUM_WORKERS=100 ts-node examples/performance-test.ts",
     "perf:extreme": "NUM_JOBS=50000 NUM_WORKERS=200 ts-node examples/performance-test.ts",
     "perf:mp": "ts-node examples/performance-test-multiprocess.ts",
-    "perf:mp:small": "NUM_JOBS=10000 NUM_WORKERS=100 NUM_PROCESSES=4 ts-node examples/performance-test-multiprocess.ts",
+    "perf:mp:small": "NUM_JOBS=10000 NUM_WORKERS=100 NUM_PROCESSES=1 ts-node examples/performance-test-multiprocess.ts",
     "perf:mp:large": "NUM_JOBS=100000 NUM_WORKERS=1000 NUM_PROCESSES=4 ts-node examples/performance-test-multiprocess.ts",
     "perf:startup": "ts-node examples/startup-shutdown-test.ts",
     "perf:latency": "ts-node examples/latency-test.ts",

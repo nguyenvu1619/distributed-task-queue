@@ -4,8 +4,10 @@ import {
   QueueService,
   JobRepository,
   QueueRepository,
+  WorkerService,
   Job,
 } from '../src/index';
+import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -13,6 +15,7 @@ dotenv.config();
 interface BenchmarkConfig {
   numJobs: number;
   numWorkers: number;
+  workerConcurrency: number;
   jobProcessingTimeMs: number;
 }
 
@@ -42,19 +45,27 @@ interface JobMetrics {
 }
 
 class PerformanceTest {
+  // Shared pool for queue setup and job publishing only
+  private static readonly SHARED_POOL_MAX = 24;
+  // Reserve a few connections for Postgres internals (autovacuum, etc.)
+  private static readonly PG_RESERVED = 10;
+
   private pool = createPool({
     host: process.env.DATABASE_HOST || 'localhost',
     port: parseInt(process.env.DATABASE_PORT || '5432', 10),
     user: process.env.DATABASE_USER || 'user',
     password: process.env.DATABASE_PASS || 'password',
     database: process.env.DATABASE_NAME || 'queue',
-    max: 150, // Increase connection pool for 100 workers + overhead
+    max: PerformanceTest.SHARED_POOL_MAX,
   });
 
   private jobRepo = new JobRepository(this.pool);
   private queueRepo = new QueueRepository(this.pool);
   private queueService = new QueueService(this.queueRepo);
   private jobService = new JobService(this.jobRepo, this.queueRepo);
+
+  private workerPools: Pool[] = [];
+  private workers: WorkerService[] = [];
 
   private metrics: BenchmarkMetrics = {
     totalJobs: 0,
@@ -94,15 +105,75 @@ class PerformanceTest {
       console.log(`   Publishing rate: ${(config.numJobs / (publishDuration / 1000)).toFixed(2)} jobs/sec`);
       console.log('─'.repeat(80));
 
-      // Step 3: Start workers
-      console.log(`👷 Starting ${config.numWorkers} workers...`);
+      // Step 3: Start workers — each with its own pool and WorkerService
+      console.log(`👷 Starting ${config.numWorkers} workers (concurrency=${config.workerConcurrency} each)...`);
       this.metrics.startTime = Date.now();
       this.metrics.totalJobs = config.numJobs;
 
-      const workerPromises: Promise<void>[] = [];
       for (let i = 0; i < config.numWorkers; i++) {
-        this.workerStats.set(i, { pulled: 0, completed: 0, failed: 0 });
-        workerPromises.push(this.startWorker(i, queue.id, config.jobProcessingTimeMs));
+        const stats = { pulled: 0, completed: 0, failed: 0 };
+        this.workerStats.set(i, stats);
+
+        // Cap per-worker pool so total connections stay under Postgres's max_connections:
+        // sharedPool + reserved + numWorkers * perWorkerMax <= pgMaxConnections
+        const pgMaxConnections = parseInt(process.env.PG_MAX_CONNECTIONS || '200', 10);
+        const perWorkerMax = Math.max(
+          Math.floor((pgMaxConnections - PerformanceTest.SHARED_POOL_MAX - PerformanceTest.PG_RESERVED) / config.numWorkers),
+          1
+        );
+        const workerPool = createPool({
+          host: process.env.DATABASE_HOST || 'localhost',
+          port: parseInt(process.env.DATABASE_PORT || '5432', 10),
+          user: process.env.DATABASE_USER || 'user',
+          password: process.env.DATABASE_PASS || 'password',
+          database: process.env.DATABASE_NAME || 'queue',
+          max: perWorkerMax,
+        });
+        this.workerPools.push(workerPool);
+
+        const workerJobRepo = new JobRepository(workerPool);
+        const workerQueueRepo = new QueueRepository(workerPool);
+        const workerJobService = new JobService(workerJobRepo, workerQueueRepo);
+
+        const worker = new WorkerService(workerJobService, {
+          queueId: queue.id,
+          concurrency: config.workerConcurrency,
+          pollInterval: 10,
+          handler: async (job: Job, _payload: unknown) => {
+            stats.pulled++;
+            const startedAt = Date.now();
+
+            await this.processJob(job, config.jobProcessingTimeMs);
+
+            const completedAt = Date.now();
+            stats.completed++;
+            this.metrics.completedJobs++;
+
+            if (!this.metrics.firstJobCompletedAt) {
+              this.metrics.firstJobCompletedAt = completedAt;
+            }
+
+            this.jobMetrics.push({
+              jobId: job.id,
+              createdAt: job.createdAt.getTime(),
+              startedAt,
+              completedAt,
+              latencyMs: completedAt - job.createdAt.getTime(),
+            });
+
+            if (this.metrics.completedJobs % 100 === 0) {
+              const elapsed = Date.now() - this.metrics.startTime;
+              const rate = (this.metrics.completedJobs / (elapsed / 1000)).toFixed(2);
+              process.stdout.write(
+                `   Progress: ${this.metrics.completedJobs}/${this.metrics.totalJobs} ` +
+                `(${rate} jobs/sec)\r`
+              );
+            }
+          },
+        });
+
+        this.workers.push(worker);
+        worker.start();
       }
 
       console.log(`✅ ${config.numWorkers} workers started`);
@@ -117,13 +188,17 @@ class PerformanceTest {
       // Print results
       this.printResults();
 
-      // Cleanup: Stop workers (they'll exit naturally once no jobs are found)
+      // Stop all workers and close their pools
       console.log('🧹 Cleaning up...');
+      await Promise.all(this.workers.map((w) => w.stop()));
+      await Promise.all(this.workerPools.map((p) => p.end()));
       await this.pool.end();
       console.log('✅ Cleanup complete');
 
     } catch (error) {
       console.error('❌ Performance test failed:', error);
+      await Promise.all(this.workers.map((w) => w.stop()));
+      await Promise.all(this.workerPools.map((p) => p.end()));
       await this.pool.end();
       throw error;
     }
@@ -162,77 +237,7 @@ class PerformanceTest {
     console.log(); // New line after progress indicator
   }
 
-  private async startWorker(
-    workerId: number,
-    queueId: number,
-    processingTimeMs: number
-  ): Promise<void> {
-    while (this.metrics.completedJobs + this.metrics.failedJobs < this.metrics.totalJobs) {
-      try {
-        // Pull a job
-        const job = await this.jobService.pullJob(queueId);
-        if (!job) {
-          // No jobs available, wait a bit
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          continue;
-        }
-
-        const stats = this.workerStats.get(workerId)!;
-        stats.pulled++;
-
-        const startedAt = Date.now();
-
-        try {
-          // Simulate job processing
-          await this.processJob(job, processingTimeMs);
-
-          // Mark job as completed
-          await this.jobService.completeJob(job.id, job.lockSeq!);
-
-          const completedAt = Date.now();
-          stats.completed++;
-          this.metrics.completedJobs++;
-
-          if (!this.metrics.firstJobCompletedAt) {
-            this.metrics.firstJobCompletedAt = completedAt;
-          }
-
-          // Record job metrics
-          this.jobMetrics.push({
-            jobId: job.id,
-            createdAt: job.createdAt.getTime(),
-            startedAt,
-            completedAt,
-            latencyMs: completedAt - job.createdAt.getTime(),
-          });
-
-          // Progress indicator
-          if (this.metrics.completedJobs % 100 === 0) {
-            const elapsed = Date.now() - this.metrics.startTime;
-            const rate = (this.metrics.completedJobs / (elapsed / 1000)).toFixed(2);
-            process.stdout.write(
-              `   Progress: ${this.metrics.completedJobs}/${this.metrics.totalJobs} ` +
-              `(${rate} jobs/sec)\r`
-            );
-          }
-        } catch (error) {
-          console.error(`Worker ${workerId} failed to process job ${job.id}:`, error);
-          try {
-            await this.jobService.failJob(job.id, job.lockSeq!);
-            stats.failed++;
-            this.metrics.failedJobs++;
-          } catch (failError) {
-            console.error(`Worker ${workerId} failed to mark job ${job.id} as failed:`, failError);
-          }
-        }
-      } catch (error) {
-        // Error pulling job, continue
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
-  }
-
-  private async processJob(job: Job, processingTimeMs: number): Promise<void> {
+  private async processJob(_job: Job, processingTimeMs: number): Promise<void> {
     // Simulate job processing
     if (processingTimeMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, processingTimeMs));
@@ -327,7 +332,8 @@ class PerformanceTest {
 async function main() {
   const config: BenchmarkConfig = {
     numJobs: parseInt(process.env.NUM_JOBS || '100000', 10),
-    numWorkers: parseInt(process.env.NUM_WORKERS || '1000', 10),
+    numWorkers: parseInt(process.env.NUM_WORKERS || '4', 10),
+    workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '24', 10),
     jobProcessingTimeMs: parseInt(process.env.JOB_PROCESSING_TIME_MS || '0', 10),
   };
 
