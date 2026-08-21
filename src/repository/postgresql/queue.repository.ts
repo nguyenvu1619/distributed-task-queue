@@ -73,23 +73,33 @@ export class QueueRepository {
       );
 
       const queue = this.deserializeQueue(queueResult.rows[0] as QueueRow);
-if(concurrency > 0) {
-      const queueShardValues: any[] = [];
-      const placeholders: string[] = [];
-      let tempMaxRunning = Math.floor(concurrency / NUMBER_OF_SHARD);
-      for (let i = 0; i < NUMBER_OF_SHARD; i++) {   
-        const offset = i * 4;
-        placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, now(), now())`);
-        queueShardValues.push(queue.id, i, tempMaxRunning, 0);
+
+      if (concurrency > 0) {
+        // Spread the configured concurrency across the shards without losing the
+        // remainder: the first `concurrency % NUMBER_OF_SHARD` shards each take
+        // one extra slot. Plain floor division would silently under-provision
+        // (100 -> 96) and, for any concurrency below NUMBER_OF_SHARD, would give
+        // every shard zero slots — leaving the queue unable to admit anything.
+        const baseMaxRunning = Math.floor(concurrency / NUMBER_OF_SHARD);
+        const remainder = concurrency % NUMBER_OF_SHARD;
+
+        const queueShardValues: any[] = [];
+        const placeholders: string[] = [];
+        for (let i = 0; i < NUMBER_OF_SHARD; i++) {
+          const offset = i * 4;
+          placeholders.push(
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, now(), now())`
+          );
+          queueShardValues.push(queue.id, i, baseMaxRunning + (i < remainder ? 1 : 0), 0);
+        }
+
+        await client.query(
+          `INSERT INTO queue_shards (queue_id, shard_no, max_running, running, created_at, updated_at) 
+           VALUES ${placeholders.join(', ')}`,
+          queueShardValues
+        );
       }
-      console.log('queueShardValues', queueShardValues);
-      console.log('placeholders', placeholders);
-      await client.query(
-        `INSERT INTO queue_shards (queue_id, shard_no, max_running, running, created_at, updated_at) 
-         VALUES ${placeholders.join(', ')}`,
-         queueShardValues
-      );
-}
+
       await client.query('COMMIT');
 
       // Update cache
@@ -120,16 +130,6 @@ if(concurrency > 0) {
       updatedAt: row.updated_at,
       concurrency: row.concurrency,
       requiresGroupId: row.requires_group_id,
-    };
-  }
-
-  /**
-   * Serialize domain model (camelCase) to database format (snake_case)
-   */
-  private serializeQueueInput(input: CreateQueueInput): { name: string; max_attempts: number } {
-    return {
-      name: input.name,
-      max_attempts: input.maxAttempts,
     };
   }
 }

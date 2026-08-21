@@ -43,6 +43,28 @@ function externalHandle(): PgHandle | null {
   };
 }
 
+/**
+ * Fail with something actionable instead of a raw `ECONNREFUSED` / `database
+ * "x" does not exist` from deep inside the migration runner.
+ */
+async function preflight(handle: PgHandle): Promise<void> {
+  const pool = createPool({ ...handle, max: 1, connectionTimeoutMillis: 5_000 });
+  try {
+    await pool.query('SELECT 1');
+  } catch (error) {
+    throw new Error(
+      `[test-harness] cannot reach Postgres at ${handle.host}:${handle.port}/${handle.database} as "${handle.user}".\n` +
+        `  ${(error as Error).message}\n` +
+        `  TEST_PG_EXTERNAL=1 reads DATABASE_HOST/PORT/USER/PASS/NAME from the environment,\n` +
+        `  falling back to .env — check those match the database you meant.\n` +
+        `  Start the project database with:  docker compose up -d\n` +
+        `  Or unset TEST_PG_EXTERNAL to let testcontainers start a throwaway one.`
+    );
+  } finally {
+    await pool.end();
+  }
+}
+
 async function waitForMigrations(handle: PgHandle): Promise<void> {
   const config: DatabaseConfig = { ...handle, max: 4 };
   const pool = createPool(config);
@@ -66,7 +88,13 @@ export default async function setup(project: TestProject) {
   const external = externalHandle();
 
   if (external) {
-    console.log(`[test-harness] using external Postgres at ${external.host}:${external.port}`);
+    // Name the database explicitly: every suite TRUNCATEs it, so it must be
+    // obvious which one is about to be wiped.
+    console.log(
+      `[test-harness] using external Postgres — ${external.user}@${external.host}:${external.port}/${external.database}`
+    );
+    console.log('[test-harness] every table in that database will be TRUNCATEd between tests');
+    await preflight(external);
     await waitForMigrations(external);
     publish(external, project);
     return async () => {

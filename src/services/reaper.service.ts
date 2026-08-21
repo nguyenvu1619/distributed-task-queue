@@ -23,8 +23,7 @@ export class ReaperService {
 
 
   async runOnce(): Promise<number[]> {
-    console.log('runOnce');
-    return this.jobRepo.recoverJobs();
+    return this.jobRepo.recoverJobs(this.batchSize);
   }
 
   start(): void {

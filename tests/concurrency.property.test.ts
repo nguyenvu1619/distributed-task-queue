@@ -38,8 +38,11 @@ afterEach(async () => {
 
 describe('mutual exclusion', () => {
   it('never hands the same job to two workers (fast path)', async () => {
+    // maxAttempts 1 makes a failure terminal, so every job is pulled exactly
+    // once and any repeat in the log is a genuine double-delivery rather than a
+    // legitimate retry.
     const queue = await h.queueService.createQueue(
-      queueInput({ concurrency: 0, leaseDuration: 120_000 })
+      queueInput({ concurrency: 0, leaseDuration: 120_000, maxAttempts: 1 })
     );
     const total = 300;
     await publishJobs(h, queue, total);
@@ -107,6 +110,13 @@ describe('queue concurrency cap', () => {
       tracker.peak,
       `client-observed peak in-flight jobs exceeded the cap of ${concurrency}`
     ).toBeLessThanOrEqual(concurrency);
+
+    // ...and the cap has to actually bind. Without a lower bound this test would
+    // still pass if a regression let the queue admit one job at a time.
+    expect(
+      tracker.peak,
+      `the queue never came close to its cap of ${concurrency} — the cap assertion above proves nothing`
+    ).toBeGreaterThan(concurrency / 2);
     expect(
       sampler.peak,
       `database-observed PROCESSING rows exceeded the cap of ${concurrency}`
@@ -222,6 +232,8 @@ describe('group concurrency cap', () => {
     await expectNoNegativeCounters(obs.pool, queue.id);
   });
 
+  // KNOWN OPEN ITEM — deliberately left red. Group-fair scheduling is a separate
+  // piece of work; this test is the marker for it, not a broken test.
   it('does not let a saturated group block unrelated groups', async () => {
     // 'busy' owns the head of the queue and can only run one job at a time;
     // 'idle' has plenty of headroom. A fair scheduler must still serve 'idle'.

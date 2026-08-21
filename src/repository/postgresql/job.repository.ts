@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
 import { Queue } from '../../domain/queue';
 import { NotFoundError } from '../../domain/errors';
@@ -100,7 +100,9 @@ export class JobRepository {
       `UPDATE jobs
        SET status = 'PROCESSING',
            lease_expires_at = now() + ($1 || ' milliseconds')::interval,
-           lease_seq = COALESCE(lease_seq, 0) + 1
+           lease_seq = COALESCE(lease_seq, 0) + 1,
+           attempts = attempts + 1,
+           updated_at = now()
        WHERE id = (
          SELECT id FROM jobs
          WHERE status = 'PENDING' AND queue_id = $2
@@ -173,7 +175,10 @@ export class JobRepository {
           return null;
         }
       }
-      if (!isExpired && shareNo) {
+      // `shareNo !== null` rather than a truthiness test: shard 0 is a real
+      // shard, and treating it as falsy left it permanently uncounted — an
+      // unbounded hole in the concurrency cap.
+      if (!isExpired && shareNo !== null) {
         // increase running count
         await client.query(
           `UPDATE queue_shards SET running = running + 1 WHERE queue_id = $1 AND shard_no = $2`,
@@ -181,27 +186,27 @@ export class JobRepository {
         );
       }
 
-      // Convert leaseDuration from milliseconds to PostgreSQL interval
-      const leaseDurationMs = queue.leaseDuration;
-      const leaseDurationSeconds = Math.floor(leaseDurationMs / 1000);
-      const intervalStr = leaseDurationSeconds >= 60
-        ? `${Math.floor(leaseDurationSeconds / 60)} minutes ${leaseDurationSeconds % 60} seconds`
-        : `${leaseDurationSeconds} seconds`;
-
-      // Update job with lease
-      await client.query(
-        `UPDATE jobs SET lease_expires_at = now() + $1::interval, queue_shard_no = $2,
-         lease_seq = $3, status = 'PROCESSING' WHERE id = $4`,
-        [intervalStr, shareNo, newLockSeq, job.id]
+      // Lease in milliseconds, matching the fast path. Truncating to whole
+      // seconds made any sub-second lease expire at the instant it was issued.
+      // RETURNING the updated row so the caller gets the lease that was actually
+      // written, not the pre-UPDATE snapshot.
+      const leased = await client.query(
+        `UPDATE jobs
+         SET lease_expires_at = now() + ($1 || ' milliseconds')::interval,
+             queue_shard_no = $2,
+             lease_seq = $3,
+             status = 'PROCESSING',
+             attempts = attempts + 1,
+             updated_at = now()
+         WHERE id = $4
+         RETURNING id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
+                   attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at`,
+        [queue.leaseDuration, shareNo, newLockSeq, job.id]
       );
 
       await client.query('COMMIT');
 
-      return {
-        ...job,
-        lockSeq: newLockSeq,
-        status: JobStatus.PROCESSING,
-      };
+      return this.deserializeJob(leased.rows[0] as JobRow);
     } catch (error) {
       await client.query('ROLLBACK');
       console.error('error', error);
@@ -285,21 +290,7 @@ export class JobRepository {
 
       const completedAt = new Date();
 
-      // Decrease shard running count
-      if (job.queueShardNo) {
-        await client.query(
-          `UPDATE queue_shards SET running = running - 1 WHERE queue_id = $1 AND shard_no = $2`,
-          [queue.id, job.queueShardNo]
-        );
-      }
-
-      // Decrease group queue limits
-      if (job.groupId) {
-        await client.query(
-          `UPDATE group_queue_limits SET running = running - 1 WHERE group_id = $1 AND queue_id = $2`,
-          [job.groupId, queue.id]
-        );
-      }
+      await this.releaseCoordinationSlots(client, queue.id, job.queueShardNo, job.groupId);
 
       await client.query('COMMIT');
 
@@ -338,8 +329,26 @@ export class JobRepository {
    * Single DELETE — mirrors completeJobFast.
    * Use when queue.concurrency === 0 AND queue.requiresGroupId === false
    */
-  private async failJobFast(id: number, lockSeq: number): Promise<Job> {
-    const result = await this.pool.query(
+  private async failJobFast(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+    // `attempts` was incremented when the job was leased, so a job still under
+    // its budget goes straight back to PENDING. lease_seq is deliberately kept:
+    // it is the fence token, and the next lease must out-rank the one that just
+    // failed so a late settle from this worker is refused.
+    const retried = await this.pool.query(
+      `UPDATE jobs
+       SET status = 'PENDING', lease_expires_at = NULL, updated_at = now()
+       WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING' AND attempts < $3
+       RETURNING id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
+                 attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at`,
+      [id, lockSeq, queue.maxAttempts]
+    );
+
+    if (retried.rows.length > 0) {
+      return this.deserializeJob(retried.rows[0] as JobRow);
+    }
+
+    // Budget spent (or the job is not ours) — discard it.
+    const discarded = await this.pool.query(
       `DELETE FROM jobs
        WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
        RETURNING id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
@@ -347,15 +356,14 @@ export class JobRepository {
       [id, lockSeq]
     );
 
-    if (result.rows.length === 0) {
+    if (discarded.rows.length === 0) {
       throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
     }
 
-    const failedAt = new Date();
     return {
-      ...this.deserializeJob(result.rows[0] as JobRow),
+      ...this.deserializeJob(discarded.rows[0] as JobRow),
       status: JobStatus.FAILED,
-      completedAt: failedAt,
+      completedAt: new Date(),
       lockSeq: null,
       leaseExpiresAt: null,
     };
@@ -386,33 +394,32 @@ export class JobRepository {
       const jobRow = jobResult.rows[0] as JobRow;
       const job = this.deserializeJob(jobRow);
 
-      // Delete from active jobs table
+      // The slot is released either way — the worker is done with this job.
+      await this.releaseCoordinationSlots(client, queue.id, job.queueShardNo, job.groupId);
+
+      if (job.attempts < queue.maxAttempts) {
+        // Back to PENDING for another attempt. lease_seq is kept as the fence
+        // token; queue_shard_no is cleared because the slot has been given back.
+        const retried = await client.query(
+          `UPDATE jobs
+           SET status = 'PENDING', lease_expires_at = NULL, queue_shard_no = NULL, updated_at = now()
+           WHERE id = $1
+           RETURNING id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
+                     attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at`,
+          [id]
+        );
+
+        await client.query('COMMIT');
+        return this.deserializeJob(retried.rows[0] as JobRow);
+      }
+
       await client.query(`DELETE FROM jobs WHERE id = $1`, [id]);
-
-      const failedAt = new Date();
-
-      // Decrease shard running count
-      if (job.queueShardNo) {
-        await client.query(
-          `UPDATE queue_shards SET running = running - 1 WHERE queue_id = $1 AND shard_no = $2`,
-          [queue.id, job.queueShardNo]
-        );
-      }
-
-      // Decrease group queue limits
-      if (job.groupId) {
-        await client.query(
-          `UPDATE group_queue_limits SET running = running - 1 WHERE group_id = $1 AND queue_id = $2`,
-          [job.groupId, queue.id]
-        );
-      }
-
       await client.query('COMMIT');
 
       return {
         ...job,
         status: JobStatus.FAILED,
-        completedAt: failedAt,
+        completedAt: new Date(),
         lockSeq: null,
         leaseExpiresAt: null,
       };
@@ -430,7 +437,7 @@ export class JobRepository {
    */
   async failJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
     if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
-      return this.failJobFast(id, lockSeq);
+      return this.failJobFast(id, lockSeq, queue);
     }
     return this.failJobWithCoordination(id, lockSeq, queue);
   }
@@ -439,54 +446,142 @@ export class JobRepository {
   // Reaper
   // ---------------------------------------------------------------------------
 
-  // Recover jobs that are expired (reaper process)
-  async recoverJobs(): Promise<number[]> {
+  /**
+   * Reclaims jobs whose lease has expired — the crash-recovery path.
+   *
+   * A job that has burned through max_attempts is discarded here rather than
+   * reset, so a job that reliably kills its worker cannot loop for ever.
+   */
+  async recoverJobs(limit: number = 100): Promise<number[]> {
     const client = await this.pool.connect();
 
     try {
       await client.query('BEGIN');
+
+      // max_attempts lives on the queue, and the reaper spans every queue, so
+      // the budget has to be joined in. Only `jobs` is locked — `queues` is a
+      // read-only lookup here.
       const listJobs = await client.query(
-        `SELECT id, group_id, queue_id, queue_shard_no FROM jobs WHERE status = 'PROCESSING' AND lease_expires_at <= now() ORDER BY created_at DESC LIMIT 100 FOR UPDATE SKIP LOCKED`,
+        `SELECT j.id, j.group_id, j.queue_id, j.queue_shard_no, j.attempts, q.max_attempts
+         FROM jobs j
+         JOIN queues q ON q.id = j.queue_id
+         WHERE j.status = 'PROCESSING' AND j.lease_expires_at <= now()
+         ORDER BY j.created_at DESC
+         LIMIT $1
+         FOR UPDATE OF j SKIP LOCKED`,
+        [limit]
       );
+
       if (listJobs.rows.length === 0) {
         await client.query('ROLLBACK');
         return [];
       }
-      const requireCoordinationJobs = listJobs.rows.some((row) => row.group_id !== null || row.queue_shard_no !== null);
-      if (requireCoordinationJobs) {
-        // Decrease the running count of the queue shard
+
+      const rows = listJobs.rows as Array<{
+        id: number;
+        group_id: string | null;
+        queue_id: number;
+        queue_shard_no: number | null;
+        attempts: number;
+        max_attempts: number;
+      }>;
+
+      // Give back every coordination slot the dead workers were holding. One
+      // statement per counter type, aggregated by key: previously only the first
+      // row of the batch was released, and it was released on every pass.
+      const shardHolders = rows.filter((row) => row.queue_shard_no !== null);
+      if (shardHolders.length > 0) {
         await client.query(
-          `UPDATE queue_shards SET running = running - 1 WHERE queue_id = $1 AND shard_no = $2`,
-          [listJobs.rows[0].queue_id, listJobs.rows[0].queue_shard_no]
+          `UPDATE queue_shards s
+           SET running = GREATEST(s.running - d.released, 0), updated_at = now()
+           FROM (
+             SELECT queue_id, shard_no, count(*)::int AS released
+             FROM unnest($1::bigint[], $2::int[]) AS t(queue_id, shard_no)
+             GROUP BY queue_id, shard_no
+           ) d
+           WHERE s.queue_id = d.queue_id AND s.shard_no = d.shard_no`,
+          [shardHolders.map((row) => row.queue_id), shardHolders.map((row) => row.queue_shard_no)]
         );
-        // Decrease the running count of the group queue limits
-        await client.query(
-          `UPDATE group_queue_limits SET running = running - 1 WHERE group_id = $1 AND queue_id = $2`,
-          [listJobs.rows[0].group_id, listJobs.rows[0].queue_id]
-        );
-        await client.query('COMMIT');
-        return [];
       }
 
-      const jobIds = listJobs.rows.map((row) => row.id);
-      const result = await client.query(
-        `UPDATE jobs
-         SET status = 'PENDING',
-             lease_expires_at = NULL,
-             lease_seq = NULL
-         WHERE id = ANY($1::bigint[])
-         RETURNING id`,
-        [jobIds]
-      );
+      const groupHolders = rows.filter((row) => row.group_id !== null);
+      if (groupHolders.length > 0) {
+        await client.query(
+          `UPDATE group_queue_limits g
+           SET running = GREATEST(g.running - d.released, 0), updated_at = now()
+           FROM (
+             SELECT queue_id, group_id, count(*)::int AS released
+             FROM unnest($1::bigint[], $2::text[]) AS t(queue_id, group_id)
+             GROUP BY queue_id, group_id
+           ) d
+           WHERE g.queue_id = d.queue_id AND g.group_id = d.group_id`,
+          [groupHolders.map((row) => row.queue_id), groupHolders.map((row) => row.group_id)]
+        );
+      }
+
+      // A lease expiry counts as a spent attempt — `attempts` was already
+      // incremented when the job was leased.
+      const exhausted = rows.filter((row) => row.attempts >= row.max_attempts).map((row) => row.id);
+      if (exhausted.length > 0) {
+        await client.query(`DELETE FROM jobs WHERE id = ANY($1::bigint[])`, [exhausted]);
+      }
+
+      const retryable = rows.filter((row) => row.attempts < row.max_attempts).map((row) => row.id);
+      let recovered: number[] = [];
+      if (retryable.length > 0) {
+        // lease_seq is NOT cleared. It is the fence token: keeping it means the
+        // next lease is strictly higher, so a worker returning from the dead is
+        // rejected when it tries to settle. Nulling it here handed the next
+        // owner the very same token the zombie still held.
+        const result = await client.query(
+          `UPDATE jobs
+           SET status = 'PENDING',
+               lease_expires_at = NULL,
+               queue_shard_no = NULL,
+               updated_at = now()
+           WHERE id = ANY($1::bigint[])
+           RETURNING id`,
+          [retryable]
+        );
+        recovered = result.rows.map((row) => Number(row.id));
+      }
 
       await client.query('COMMIT');
 
-      return result.rows.map((row) => parseInt(row.id, 10));
+      return recovered;
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  /**
+   * Gives back the shard and group slots a job was occupying. Clamped at zero so
+   * a counter that has already drifted cannot go negative — a negative `running`
+   * satisfies `running < max_running` for ever, which would disable the cap.
+   */
+  private async releaseCoordinationSlots(
+    client: PoolClient,
+    queueId: number,
+    queueShardNo: number | null,
+    groupId: string | null
+  ): Promise<void> {
+    if (queueShardNo !== null) {
+      await client.query(
+        `UPDATE queue_shards SET running = GREATEST(running - 1, 0), updated_at = now()
+         WHERE queue_id = $1 AND shard_no = $2`,
+        [queueId, queueShardNo]
+      );
+    }
+
+    if (groupId !== null) {
+      await client.query(
+        `UPDATE group_queue_limits SET running = GREATEST(running - 1, 0), updated_at = now()
+         WHERE queue_id = $1 AND group_id = $2`,
+        [queueId, groupId]
+      );
     }
   }
 

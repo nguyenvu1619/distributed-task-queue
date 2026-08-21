@@ -154,7 +154,8 @@ describe('lease fencing (deterministic — lease forced to expire)', () => {
   });
 
   it('advances lease_seq by exactly one on each re-lease', async () => {
-    const queue = await fastQueue();
+    // A generous budget: this test is about the fence token, not the retry cap.
+    const queue = await fastQueue({ maxAttempts: 10 });
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
 
     const seen: number[] = [];
@@ -270,6 +271,36 @@ describe('reaper', () => {
     const shards = await readShardCounters(h.pool, queue.id);
     const negative = shards.filter((s) => s.running < 0);
     expect(negative, 'repeated reaper passes drove a shard counter negative').toEqual([]);
+  });
+
+  it('gives up on a job that burns through its attempts by crashing', async () => {
+    const maxAttempts = 2;
+    const queue = await fastQueue({ maxAttempts });
+    const published = await h.jobRepo.publishJob(jobInput(queue.id));
+
+    for (let i = 0; i < maxAttempts; i++) {
+      const pulled = await h.jobRepo.pullJob(queue);
+      expect(pulled, `attempt ${i + 1} was not offered`).not.toBeNull();
+      await expireLease(h.pool, published.id);
+      await h.reaper.runOnce();
+    }
+
+    // A job that kills its worker every time must not be reclaimed for ever.
+    expect(await readJobRow(h.pool, published.id)).toBeNull();
+    expect(await h.jobRepo.pullJob(queue)).toBeNull();
+  });
+
+  it('releases the coordination slot of a job it gives up on', async () => {
+    const queue = await coordinatedQueue({ maxAttempts: 1 });
+    const published = await h.jobRepo.publishJob(jobInput(queue.id));
+
+    await h.jobRepo.pullJob(queue);
+    await expireLease(h.pool, published.id);
+    expect(await h.reaper.runOnce()).toEqual([]);
+
+    expect(await readJobRow(h.pool, published.id)).toBeNull();
+    const shards = await readShardCounters(h.pool, queue.id);
+    expect(shards.reduce((sum, s) => sum + s.running, 0)).toBe(0);
   });
 
   it('leaves jobs on other queues alone', async () => {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { JobStatus } from '../src/domain/job';
-import { NUMBER_OF_SHARD } from '../src/domain/queue';
+import { CreateQueueInput, NUMBER_OF_SHARD } from '../src/domain/queue';
 import { NotFoundError } from '../src/domain/errors';
 import {
   Harness,
@@ -75,7 +75,8 @@ describe('queue lifecycle', () => {
 });
 
 describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
-  const fastQueue = () => h.queueService.createQueue(queueInput({ concurrency: 0 }));
+  const fastQueue = (overrides: Partial<CreateQueueInput> = {}) =>
+    h.queueService.createQueue(queueInput({ concurrency: 0, ...overrides }));
 
   it('publishes a job in PENDING with no lease and no shard', async () => {
     const queue = await fastQueue();
@@ -150,8 +151,8 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     expect(await readJobRow(h.pool, published.id)).toBeNull();
   });
 
-  it('removes the row from `jobs` when a job fails', async () => {
-    const queue = await fastQueue();
+  it('removes the row from `jobs` when a job exhausts its attempts', async () => {
+    const queue = await fastQueue({ maxAttempts: 1 });
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
     const pulled = await h.jobRepo.pullJob(queue);
 
@@ -204,6 +205,92 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     // Characterisation, not a requirement: there is no `job_status` archive in
     // the current schema, so terminal jobs are simply gone. See test report.
     await expect(h.jobRepo.getById(pulled!.id)).rejects.toBeInstanceOf(NotFoundError);
+  });
+});
+
+describe('retry policy', () => {
+  it('counts each lease as an attempt', async () => {
+    const queue = await h.queueService.createQueue(
+      queueInput({ concurrency: 0, maxAttempts: 5 })
+    );
+    await h.jobRepo.publishJob(jobInput(queue.id));
+
+    const first = await h.jobRepo.pullJob(queue);
+    expect(first!.attempts).toBe(1);
+
+    await h.jobRepo.failJob(first!.id, first!.lockSeq!, queue);
+    const second = await h.jobRepo.pullJob(queue);
+    expect(second!.attempts).toBe(2);
+  });
+
+  it('returns a failed job to the queue while it still has attempts left', async () => {
+    const queue = await h.queueService.createQueue(
+      queueInput({ concurrency: 0, maxAttempts: 3 })
+    );
+    const published = await h.jobRepo.publishJob(jobInput(queue.id));
+
+    const pulled = await h.jobRepo.pullJob(queue);
+    const outcome = await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq!, queue);
+
+    expect(outcome.status).toBe(JobStatus.PENDING);
+
+    const row = await readJobRow(h.pool, published.id);
+    expect(row.status).toBe(JobStatus.PENDING);
+    expect(row.lease_expires_at).toBeNull();
+    // lease_seq survives the retry — it is the fence token, not lease state.
+    expect(row.lease_seq).not.toBeNull();
+  });
+
+  it('discards the job on the failure that spends the last attempt', async () => {
+    const maxAttempts = 3;
+    const queue = await h.queueService.createQueue(queueInput({ concurrency: 0, maxAttempts }));
+    const published = await h.jobRepo.publishJob(jobInput(queue.id));
+
+    const outcomes: JobStatus[] = [];
+    for (let i = 0; i < maxAttempts; i++) {
+      const pulled = await h.jobRepo.pullJob(queue);
+      expect(pulled, `attempt ${i + 1} of ${maxAttempts} was not offered`).not.toBeNull();
+      outcomes.push((await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq!, queue)).status);
+    }
+
+    expect(outcomes).toEqual([JobStatus.PENDING, JobStatus.PENDING, JobStatus.FAILED]);
+    expect(await readJobRow(h.pool, published.id)).toBeNull();
+    expect(await h.jobRepo.pullJob(queue)).toBeNull();
+  });
+
+  it('gives the coordination slot back when a failed job is retried', async () => {
+    const queue = await h.queueService.createQueue(
+      queueInput({ concurrency: NUMBER_OF_SHARD * 2, maxAttempts: 3 })
+    );
+    const published = await h.jobRepo.publishJob(jobInput(queue.id));
+
+    const pulled = await h.jobRepo.pullJob(queue);
+    const outcome = await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq!, queue);
+    expect(outcome.status).toBe(JobStatus.PENDING);
+
+    const shards = await readShardCounters(h.pool, queue.id);
+    expect(shards.reduce((sum, s) => sum + s.running, 0)).toBe(0);
+
+    const row = await readJobRow(h.pool, published.id);
+    expect(row.queue_shard_no, 'a retried job must not keep claiming a shard').toBeNull();
+
+    // ...and it can be picked up again.
+    expect(await h.jobRepo.pullJob(queue)).not.toBeNull();
+  });
+
+  it('does not count a completed job against the budget of anything else', async () => {
+    const queue = await h.queueService.createQueue(
+      queueInput({ concurrency: 0, maxAttempts: 1 })
+    );
+    await h.jobRepo.publishJob(jobInput(queue.id));
+    await h.jobRepo.publishJob(jobInput(queue.id));
+
+    const first = await h.jobRepo.pullJob(queue);
+    await h.jobRepo.completeJob(first!.id, first!.lockSeq!, queue);
+
+    const second = await h.jobRepo.pullJob(queue);
+    expect(second).not.toBeNull();
+    expect(second!.attempts).toBe(1);
   });
 });
 
