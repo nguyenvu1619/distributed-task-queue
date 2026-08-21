@@ -446,7 +446,7 @@ export class JobRepository {
     try {
       await client.query('BEGIN');
       const listJobs = await client.query(
-        `SELECT id, group_id, queue_id, queue_shard_no FROM jobs WHERE status = 'PROCESSING' AND lease_expires_at <= now() FOR UPDATE SKIP LOCKED ORDER BY created_at DESC LIMIT 100`,
+        `SELECT id, group_id, queue_id, queue_shard_no FROM jobs WHERE status = 'PROCESSING' AND lease_expires_at <= now() ORDER BY created_at DESC LIMIT 100 FOR UPDATE SKIP LOCKED`,
       );
       if (listJobs.rows.length === 0) {
         await client.query('ROLLBACK');

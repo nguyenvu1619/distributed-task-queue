@@ -7,6 +7,13 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:lifecycle": "vitest run tests/lifecycle.test.ts",
+    "test:concurrency": "vitest run tests/concurrency.property.test.ts",
+    "test:crash": "vitest run tests/crash-fencing.test.ts",
+    "test:external": "TEST_PG_EXTERNAL=1 vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "migrate:up": "ts-node src/migration/runner.ts up",
     "migrate:down": "ts-node src/migration/runner.ts down",
     "example:producer": "ts-node examples/producer.ts",
@@ -34,14 +41,16 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "pg": "^8.11.3",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "pg": "^8.11.3"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "^10.28.0",
     "@types/node": "^20.10.0",
     "@types/pg": "^8.10.9",
+    "testcontainers": "^10.28.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.7"
   }
 }
-
