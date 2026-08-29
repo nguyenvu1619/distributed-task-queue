@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     queue_id            BIGINT NOT NULL,
     queue_shard_no      INTEGER NULL,
     attempts            INTEGER NOT NULL DEFAULT 0,
-    -- Stored as JSON for flexibility (note: scanning into a Go struct requires custom decoding).
     metadata            JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),

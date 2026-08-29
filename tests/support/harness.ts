@@ -63,7 +63,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     queueRepo,
     jobService: new JobService(jobRepo, queueRepo),
     queueService: new QueueService(queueRepo),
-    reaper: new ReaperService(jobRepo, queueRepo),
+    reaper: new ReaperService(jobRepo),
     close: () => pool.end(),
   };
 }

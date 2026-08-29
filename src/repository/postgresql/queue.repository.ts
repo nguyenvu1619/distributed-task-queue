@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { Queue, CreateQueueInput, NUMBER_OF_SHARD, QueueShards } from '../../domain/queue';
 import { NotFoundError } from '../../domain/errors';
+import { Logger, consoleLogger } from '../../domain/logger';
 
 // Database row interface (snake_case)
 interface QueueRow {
@@ -17,7 +18,10 @@ interface QueueRow {
 export class QueueRepository {
   private cache: Map<number, Queue> = new Map();
 
-  constructor(private pool: Pool) {}
+  constructor(
+    private pool: Pool,
+    private logger: Logger = consoleLogger
+  ) {}
 
   async getById(id: number): Promise<Queue> {
     // Check cache first
