@@ -1,4 +1,4 @@
-# PR stack — 16 stacked pull requests
+# PR stack — 17 stacked pull requests
 
 Splits `6c29d92` → the full v1 working tree. One file per PR in this folder:
 open the compare link, paste the title, paste the description, create.
@@ -24,6 +24,7 @@ PR02's base pointing at the pre-merge commit and inflates its diff.
 | 14 | [14-examples.md](14-examples.md) | examples on the public API | 223+ / 88− |
 | 15 | [15-facade-tests.md](15-facade-tests.md) | 5 API suites | 4515+ |
 | 16 | [16-docs.md](16-docs.md) | README, checklist, test report | 2224+ |
+| 17 | [17-single-round-trip.md](17-single-round-trip.md) | **every job path in one round trip, no explicit transactions** | 779 lines reworked |
 
 ## Three blockers, verified in the code
 
