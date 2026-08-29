@@ -13,7 +13,7 @@ interface MigrationFile {
   downPath: string;
 }
 
-async function ensureMigrationsTable(pool: Pool): Promise<void> {
+export async function ensureMigrationsTable(pool: Pool): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version BIGINT NOT NULL PRIMARY KEY,
@@ -22,7 +22,7 @@ async function ensureMigrationsTable(pool: Pool): Promise<void> {
   `);
 }
 
-function parseMigrationFiles(migrationsPath: string): MigrationFile[] {
+export function parseMigrationFiles(migrationsPath: string): MigrationFile[] {
   const files = fs.readdirSync(migrationsPath);
   const migrations: MigrationFile[] = [];
 
@@ -106,7 +106,7 @@ async function applyMigration(pool: Pool, migration: MigrationFile, direction: '
   }
 }
 
-async function migrateUp(pool: Pool, migrationsPath: string): Promise<void> {
+export async function migrateUp(pool: Pool, migrationsPath: string): Promise<void> {
   await ensureMigrationsTable(pool);
   const migrations = parseMigrationFiles(migrationsPath);
   const currentVersion = await getCurrentVersion(pool);
@@ -127,7 +127,7 @@ async function migrateUp(pool: Pool, migrationsPath: string): Promise<void> {
   console.log('Migrations applied successfully');
 }
 
-async function migrateDown(pool: Pool, migrationsPath: string, steps: number = 1): Promise<void> {
+export async function migrateDown(pool: Pool, migrationsPath: string, steps: number = 1): Promise<void> {
   await ensureMigrationsTable(pool);
   const migrations = parseMigrationFiles(migrationsPath);
   const currentVersion = await getCurrentVersion(pool);
