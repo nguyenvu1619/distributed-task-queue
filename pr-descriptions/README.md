@@ -23,7 +23,7 @@ PR02's base pointing at the pre-merge commit and inflates its diff.
 | 13 | [13-client-facade.md](13-client-facade.md) | `src/client/`, narrowed exports | 686+ / 15− |
 | 14 | [14-examples.md](14-examples.md) | examples on the public API | 223+ / 88− |
 | 15 | [15-facade-tests.md](15-facade-tests.md) | 5 API suites | 4517+ |
-| 16 | [16-docs.md](16-docs.md) | README, checklist, test report | 2239+ |
+| 16 | [16-docs.md](16-docs.md) | README, checklist, test report | 2226+ |
 
 ## Two blockers, verified in the code
 
