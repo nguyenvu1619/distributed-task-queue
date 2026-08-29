@@ -89,14 +89,22 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     expect(job.attempts).toBe(0);
   });
 
-  it('rejects a duplicate idempotency key', async () => {
+  it('deduplicates a repeated idempotency key instead of inserting twice', async () => {
     const queue = await fastQueue();
     const key = uniqueName('dupe');
 
-    await h.jobRepo.publishJob(jobInput(queue.id, { idempotencyKey: key }));
-    await expect(
-      h.jobRepo.publishJob(jobInput(queue.id, { idempotencyKey: key }))
-    ).rejects.toMatchObject({ code: '23505' });
+    const first = await h.jobRepo.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+    const second = await h.jobRepo.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+
+    expect(first.deduplicated).toBe(false);
+    expect(second.deduplicated).toBe(true);
+    expect(second.id).toBe(first.id);
+
+    // Exactly one row, so exactly one delivery.
+    const count = await h.pool.query('SELECT count(*)::int AS n FROM jobs WHERE queue_id = $1', [
+      queue.id,
+    ]);
+    expect(count.rows[0].n).toBe(1);
   });
 
   it('returns null when the queue is empty', async () => {
