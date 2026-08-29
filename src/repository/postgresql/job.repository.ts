@@ -1,8 +1,13 @@
 import { Pool, PoolClient } from 'pg';
-import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
+import { Job, JobStatus, CreateJobInput, Metadata, PublishedJob } from '../../domain/job';
 import { Queue } from '../../domain/queue';
-import { NotFoundError } from '../../domain/errors';
+import { ConflictError, NotFoundError } from '../../domain/errors';
+import { Executor } from '../../domain/executor';
 import { Logger, consoleLogger } from '../../domain/logger';
+
+// Every read of an active job returns the same projection.
+const JOB_COLUMNS = `id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
+         attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at`;
 
 // Database row interface for the active jobs table (snake_case)
 // Note: completed_at is not stored — completed/failed jobs are deleted
@@ -29,6 +34,47 @@ export class JobRepository {
     private logger: Logger = consoleLogger
   ) {}
 
+  /**
+   * The fast path is a single statement with no coordination counters to keep.
+   * Same predicate governs pull, complete, fail and discard, so it lives here
+   * rather than being restated at each call site.
+   */
+  private isFastPath(queue: Queue): boolean {
+    return (queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId;
+  }
+
+  /**
+   * Runs `fn` inside a transaction — unless the caller supplied one, in which
+   * case it joins theirs and emits no BEGIN/COMMIT/ROLLBACK of its own. This is
+   * what lets a publish ride along in the user's business transaction: the job
+   * row and their own writes commit together, or neither does, with no outbox
+   * table in between.
+   */
+  private async withExecutor<T>(
+    executor: Executor | undefined,
+    fn: (db: Executor) => Promise<T>
+  ): Promise<T> {
+    if (executor) {
+      return fn(executor);
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      // A failing ROLLBACK (dead connection) must not mask why we got here.
+      await client.query('ROLLBACK').catch((rollbackError) => {
+        this.logger.error('Rollback failed after a publish error', rollbackError);
+      });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getById(id: number): Promise<Job> {
     const result = await this.pool.query(
       `SELECT id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no, attempts,
@@ -44,43 +90,142 @@ export class JobRepository {
     return this.deserializeJob(result.rows[0] as JobRow);
   }
 
-  async publishJob(input: CreateJobInput): Promise<Job> {
-    const metadata = input.metadata || {};
-    const attempts = input.attempts || 0;
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const publishResult = await client.query(
-        `INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no, attempts,
-         metadata, created_at, updated_at, lease_seq, lease_expires_at`,
-        [
-          input.idempotencyKey,
-          input.payload,
-          JobStatus.PENDING,
-          input.group?.id || null,
-          input.queueId,
-          attempts,
-          JSON.stringify(metadata),
-        ]
+  /**
+   * Publishes one job. Pass `executor` — a pg PoolClient, or anything exposing
+   * `query(text, values)` — to enqueue inside a transaction the caller owns.
+   */
+  async publishJob(input: CreateJobInput, executor?: Executor): Promise<PublishedJob> {
+    const [job] = await this.publishJobs([input], executor);
+    return job;
+  }
+
+  /**
+   * Publishes a batch in a single round trip. One INSERT with N rows, rather
+   * than N connections each doing BEGIN/INSERT/COMMIT.
+   */
+  async publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<PublishedJob[]> {
+    if (inputs.length === 0) {
+      return [];
+    }
+    // Without a group there is only one statement, so a transaction buys
+    // nothing but two extra round trips.
+    const needsTransaction = inputs.some((input) => input.group?.id && input.group?.concurrency);
+    if (!executor && !needsTransaction) {
+      return this.insertJobs(this.pool, inputs);
+    }
+    return this.withExecutor(executor, (db) => this.insertJobs(db, inputs));
+  }
+
+  private async insertJobs(db: Executor, inputs: CreateJobInput[]): Promise<PublishedJob[]> {
+    const placeholders: string[] = [];
+    const values: any[] = [];
+
+    inputs.forEach((input, index) => {
+      const offset = index * 7;
+      placeholders.push(
+        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, ` +
+          `$${offset + 5}, $${offset + 6}, $${offset + 7}::jsonb)`
       );
+      values.push(
+        input.idempotencyKey,
+        input.payload,
+        JobStatus.PENDING,
+        input.group?.id || null,
+        input.queueId,
+        input.attempts || 0,
+        JSON.stringify(input.metadata || {})
+      );
+    });
+
+    // ON CONFLICT DO NOTHING rather than letting the UNIQUE violation fly: a
+    // raw 23505 aborts the *whole* enclosing transaction, so a duplicate
+    // publish would take the caller's business writes down with it.
+    const inserted = await db.query(
+      `INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
+       VALUES ${placeholders.join(', ')}
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING ${JOB_COLUMNS}`,
+      values
+    );
+
+    const groups = new Map<string, { groupId: string; queueId: number; concurrency: number }>();
+    for (const input of inputs) {
       if (input.group?.id && input.group?.concurrency) {
-        await client.query(
-          `INSERT INTO group_queue_limits (group_id, queue_id, max_running, running, updated_at, created_at)
-           VALUES ($1, $2, $3, $4, now(), now()) ON CONFLICT DO NOTHING`,
-          [input.group.id, input.queueId, input.group.concurrency, 0]
+        groups.set(`${input.queueId}:${input.group.id}`, {
+          groupId: input.group.id,
+          queueId: input.queueId,
+          concurrency: input.group.concurrency,
+        });
+      }
+    }
+
+    for (const group of groups.values()) {
+      await db.query(
+        `INSERT INTO group_queue_limits (group_id, queue_id, max_running, running, updated_at, created_at)
+         VALUES ($1, $2, $3, $4, now(), now()) ON CONFLICT DO NOTHING`,
+        [group.groupId, group.queueId, group.concurrency, 0]
+      );
+    }
+
+    const rowsByKey = new Map<string, JobRow>();
+    for (const row of inserted.rows as JobRow[]) {
+      rowsByKey.set(row.idempotency_key, row);
+    }
+
+    // Anything the insert skipped already exists — read it back so the caller
+    // gets the live job rather than an error.
+    const conflicted = inputs
+      .map((input) => input.idempotencyKey)
+      .filter((key) => !rowsByKey.has(key));
+
+    if (conflicted.length > 0) {
+      const existing = await db.query(
+        `SELECT ${JOB_COLUMNS} FROM jobs WHERE idempotency_key = ANY($1::text[])`,
+        [conflicted]
+      );
+      for (const row of existing.rows as JobRow[]) {
+        rowsByKey.set(row.idempotency_key, row);
+      }
+    }
+
+    const freshKeys = new Set((inserted.rows as JobRow[]).map((row) => row.idempotency_key));
+    const seen = new Set<string>();
+
+    return inputs.map((input) => {
+      const row = rowsByKey.get(input.idempotencyKey);
+      if (!row) {
+        // The insert skipped it and the follow-up read could not see it either:
+        // a concurrent publisher under REPEATABLE READ, or the conflicting job
+        // reached a terminal state and was deleted in between. Typed error, and
+        // the caller's transaction is still usable.
+        throw new ConflictError(
+          `Job with idempotency key ${input.idempotencyKey} conflicts with a concurrent publish`
         );
       }
-      await client.query('COMMIT');
-      return this.deserializeJob(publishResult.rows[0] as JobRow);
-    } catch (error) {
-      this.logger.error('Failed to publish a job', error);
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+      // Second and later occurrences of a key within one batch are duplicates
+      // of the row this same call just inserted.
+      const isFresh = freshKeys.has(input.idempotencyKey) && !seen.has(input.idempotencyKey);
+      seen.add(input.idempotencyKey);
+      return { ...this.deserializeJob(row), deduplicated: !isFresh };
+    });
+  }
+
+  /** Live counts for a queue. Terminal jobs are deleted, so this is the backlog. */
+  async countByStatus(queueId: number): Promise<{ pending: number; processing: number }> {
+    const result = await this.pool.query(
+      `SELECT status, count(*)::int AS count FROM jobs WHERE queue_id = $1 GROUP BY status`,
+      [queueId]
+    );
+
+    const counts = { pending: 0, processing: 0 };
+    for (const row of result.rows as Array<{ status: string; count: number }>) {
+      if (row.status === JobStatus.PENDING) {
+        counts.pending = Number(row.count);
+      } else if (row.status === JobStatus.PROCESSING) {
+        counts.processing = Number(row.count);
+      }
     }
+    return counts;
   }
 
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {
@@ -228,7 +373,7 @@ export class JobRepository {
    * Fast path requires BOTH: concurrency === 0 AND requiresGroupId === false
    */
   async pullJob(queue: Queue): Promise<Job | null> {
-    if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
+    if (this.isFastPath(queue)) {
       return this.pullJobFast(queue);
     }
     return this.pullJobWithCoordination(queue);
@@ -320,7 +465,7 @@ export class JobRepository {
    * Automatically selects fast or full path based on queue configuration
    */
   async completeJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
-    if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
+    if (this.isFastPath(queue)) {
       return this.completeJobFast(id, lockSeq);
     }
     return this.completeJobWithCoordination(id, lockSeq, queue);
@@ -442,7 +587,7 @@ export class JobRepository {
    * Automatically selects fast or full path based on queue configuration
    */
   async failJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
-    if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
+    if (this.isFastPath(queue)) {
       return this.failJobFast(id, lockSeq, queue);
     }
     return this.failJobWithCoordination(id, lockSeq, queue);
@@ -601,21 +746,25 @@ export class JobRepository {
   private deserializeJob(row: JobRow): Job {
     const metadata = this.deserializeMetadata(row.metadata);
 
+    // id / queue_id / lease_seq are BIGINT. connection.ts registers an INT8
+    // parser on this package's `pg`, but a caller-supplied client may come from
+    // a different copy of pg and hand back strings — and `lease_seq + 1` on a
+    // string is concatenation, which silently breaks lease fencing.
     return {
-      id: row.id,
+      id: Number(row.id),
       idempotencyKey: row.idempotency_key,
       payload: row.payload,
-      queueShardNo: row.queue_shard_no,
+      queueShardNo: row.queue_shard_no === null ? null : Number(row.queue_shard_no),
       status: row.status as JobStatus,
       groupId: row.group_id,
-      queueId: row.queue_id,
+      queueId: Number(row.queue_id),
       attempts: row.attempts,
       metadata,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: null,              // active jobs are never completed
       leaseExpiresAt: row.lease_expires_at,
-      lockSeq: row.lease_seq,
+      lockSeq: row.lease_seq === null ? null : Number(row.lease_seq),
     };
   }
 
