@@ -1,6 +1,7 @@
 import { JobRepository } from '../repository/postgresql/job.repository';
 import { QueueRepository } from '../repository/postgresql/queue.repository';
-import { Job, JobStatus, CreateJobInput } from '../domain/job';
+import { Job, JobStatus, CreateJobInput, PublishedJob } from '../domain/job';
+import { Executor } from '../domain/executor';
 import { Queue } from '../domain/queue';
 
 export class JobService {
@@ -13,8 +14,12 @@ export class JobService {
     return this.jobRepo.getById(id);
   }
 
-  async publishJob(input: CreateJobInput): Promise<Job> {
-    return this.jobRepo.publishJob(input);
+  async publishJob(input: CreateJobInput, executor?: Executor): Promise<PublishedJob> {
+    return this.jobRepo.publishJob(input, executor);
+  }
+
+  async publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<PublishedJob[]> {
+    return this.jobRepo.publishJobs(inputs, executor);
   }
 
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {

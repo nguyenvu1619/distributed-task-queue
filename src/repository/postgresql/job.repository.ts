@@ -1,7 +1,8 @@
 import { Pool } from 'pg';
-import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
+import { Job, JobStatus, CreateJobInput, Metadata, PublishedJob } from '../../domain/job';
 import { Queue } from '../../domain/queue';
-import { NotFoundError } from '../../domain/errors';
+import { ConflictError, NotFoundError } from '../../domain/errors';
+import { Executor } from '../../domain/executor';
 import { Logger, consoleLogger } from '../../domain/logger';
 
 // Every read of an active job returns the same projection.
@@ -34,6 +35,15 @@ export class JobRepository {
     private logger: Logger = consoleLogger
   ) {}
 
+  /**
+   * The fast path is a single statement with no coordination counters to keep.
+   * Same predicate governs pull, complete, fail and discard, so it lives here
+   * rather than being restated at each call site.
+   */
+  private isFastPath(queue: Queue): boolean {
+    return (queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId;
+  }
+
   async getById(id: number): Promise<Job> {
     const result = await this.pool.query(
       `SELECT id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no, attempts,
@@ -50,47 +60,152 @@ export class JobRepository {
   }
 
   /**
-   * Publishes one job. The insert and its group-limit seeding travel as one
-   * statement, which keeps the pair atomic without a transaction: a job whose
-   * limit row never landed would fail the group gate on every pull and jam the
-   * queue head for ever.
+   * Publishes one job. Pass `executor` — a pg PoolClient, or anything exposing
+   * `query(text, values)` — to enqueue inside a transaction the caller owns.
    */
-  async publishJob(input: CreateJobInput): Promise<Job> {
-    const metadata = input.metadata || {};
-    const attempts = input.attempts || 0;
+  async publishJob(input: CreateJobInput, executor?: Executor): Promise<PublishedJob> {
+    const [job] = await this.publishJobs([input], executor);
+    return job;
+  }
 
-    const values: any[] = [
-      input.idempotencyKey,
-      input.payload,
-      JobStatus.PENDING,
-      input.group?.id || null,
-      input.queueId,
-      attempts,
-      JSON.stringify(metadata),
-    ];
+  /**
+   * Publishes a batch in a single round trip. One INSERT with N rows, rather
+   * than N connections each doing BEGIN/INSERT/COMMIT.
+   */
+  async publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<PublishedJob[]> {
+    if (inputs.length === 0) {
+      return [];
+    }
+    // A single statement is already atomic, so a standalone publish needs no
+    // BEGIN/COMMIT of its own. With an executor it joins the caller's
+    // transaction.
+    return this.insertJobs(executor ?? this.pool, inputs);
+  }
 
-    let limitsCte = '';
-    if (input.group?.id && input.group?.concurrency) {
-      limitsCte = `,
-       limits AS (
-         INSERT INTO group_queue_limits (group_id, queue_id, max_running, running, updated_at, created_at)
-         VALUES ($8, $9, $10, 0, now(), now())
-         ON CONFLICT DO NOTHING
-       )`;
-      values.push(input.group.id, input.queueId, input.group.concurrency);
+  private async insertJobs(db: Executor, inputs: CreateJobInput[]): Promise<PublishedJob[]> {
+    const placeholders: string[] = [];
+    const values: any[] = [];
+
+    inputs.forEach((input, index) => {
+      const offset = index * 7;
+      placeholders.push(
+        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, ` +
+          `$${offset + 5}, $${offset + 6}, $${offset + 7}::jsonb)`
+      );
+      values.push(
+        input.idempotencyKey,
+        input.payload,
+        JobStatus.PENDING,
+        input.group?.id || null,
+        input.queueId,
+        input.attempts || 0,
+        JSON.stringify(input.metadata || {})
+      );
+    });
+
+    const groups = new Map<string, { groupId: string; queueId: number; concurrency: number }>();
+    for (const input of inputs) {
+      if (input.group?.id && input.group?.concurrency) {
+        groups.set(`${input.queueId}:${input.group.id}`, {
+          groupId: input.group.id,
+          queueId: input.queueId,
+          concurrency: input.group.concurrency,
+        });
+      }
     }
 
-    const result = await this.pool.query(
+    // The group-limit rows ride in the same statement as the insert. That keeps
+    // the pair atomic without a transaction: a job whose limit row never landed
+    // would fail the group gate on every pull and jam the queue head for ever.
+    const limitPlaceholders: string[] = [];
+    for (const group of groups.values()) {
+      const offset = values.length;
+      limitPlaceholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, 0, now(), now())`);
+      values.push(group.groupId, group.queueId, group.concurrency);
+    }
+    const limitsCte =
+      limitPlaceholders.length > 0
+        ? `,
+       limits AS (
+         INSERT INTO group_queue_limits (group_id, queue_id, max_running, running, updated_at, created_at)
+         VALUES ${limitPlaceholders.join(', ')}
+         ON CONFLICT DO NOTHING
+       )`
+        : '';
+
+    // ON CONFLICT DO NOTHING rather than letting the UNIQUE violation fly: a
+    // raw 23505 aborts the *whole* enclosing transaction, so a duplicate
+    // publish would take the caller's business writes down with it.
+    const inserted = await db.query(
       `WITH ins AS (
          INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         VALUES ${placeholders.join(', ')}
+         ON CONFLICT (idempotency_key) DO NOTHING
          RETURNING ${JOB_COLUMNS}
        )${limitsCte}
        SELECT * FROM ins`,
       values
     );
 
-    return this.deserializeJob(result.rows[0] as JobRow);
+    const rowsByKey = new Map<string, JobRow>();
+    for (const row of inserted.rows as JobRow[]) {
+      rowsByKey.set(row.idempotency_key, row);
+    }
+
+    // Anything the insert skipped already exists — read it back so the caller
+    // gets the live job rather than an error.
+    const conflicted = inputs
+      .map((input) => input.idempotencyKey)
+      .filter((key) => !rowsByKey.has(key));
+
+    if (conflicted.length > 0) {
+      const existing = await db.query(
+        `SELECT ${JOB_COLUMNS} FROM jobs WHERE idempotency_key = ANY($1::text[])`,
+        [conflicted]
+      );
+      for (const row of existing.rows as JobRow[]) {
+        rowsByKey.set(row.idempotency_key, row);
+      }
+    }
+
+    const freshKeys = new Set((inserted.rows as JobRow[]).map((row) => row.idempotency_key));
+    const seen = new Set<string>();
+
+    return inputs.map((input) => {
+      const row = rowsByKey.get(input.idempotencyKey);
+      if (!row) {
+        // The insert skipped it and the follow-up read could not see it either:
+        // a concurrent publisher under REPEATABLE READ, or the conflicting job
+        // reached a terminal state and was deleted in between. Typed error, and
+        // the caller's transaction is still usable.
+        throw new ConflictError(
+          `Job with idempotency key ${input.idempotencyKey} conflicts with a concurrent publish`
+        );
+      }
+      // Second and later occurrences of a key within one batch are duplicates
+      // of the row this same call just inserted.
+      const isFresh = freshKeys.has(input.idempotencyKey) && !seen.has(input.idempotencyKey);
+      seen.add(input.idempotencyKey);
+      return { ...this.deserializeJob(row), deduplicated: !isFresh };
+    });
+  }
+
+  /** Live counts for a queue. Terminal jobs are deleted, so this is the backlog. */
+  async countByStatus(queueId: number): Promise<{ pending: number; processing: number }> {
+    const result = await this.pool.query(
+      `SELECT status, count(*)::int AS count FROM jobs WHERE queue_id = $1 GROUP BY status`,
+      [queueId]
+    );
+
+    const counts = { pending: 0, processing: 0 };
+    for (const row of result.rows as Array<{ status: string; count: number }>) {
+      if (row.status === JobStatus.PENDING) {
+        counts.pending = Number(row.count);
+      } else if (row.status === JobStatus.PROCESSING) {
+        counts.processing = Number(row.count);
+      }
+    }
+    return counts;
   }
 
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {
@@ -252,7 +367,7 @@ export class JobRepository {
    * Fast path requires BOTH: concurrency === 0 AND requiresGroupId === false
    */
   async pullJob(queue: Queue): Promise<Job | null> {
-    if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
+    if (this.isFastPath(queue)) {
       return this.pullJobFast(queue);
     }
     return this.pullJobWithCoordination(queue);
@@ -368,7 +483,7 @@ export class JobRepository {
    * Automatically selects fast or full path based on queue configuration
    */
   async completeJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
-    if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
+    if (this.isFastPath(queue)) {
       return this.completeJobFast(id, lockSeq);
     }
     return this.completeJobWithCoordination(id, lockSeq, queue);
@@ -505,7 +620,7 @@ export class JobRepository {
    * Automatically selects fast or full path based on queue configuration
    */
   async failJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
-    if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
+    if (this.isFastPath(queue)) {
       return this.failJobFast(id, lockSeq, queue);
     }
     return this.failJobWithCoordination(id, lockSeq, queue);
@@ -612,21 +727,25 @@ export class JobRepository {
   private deserializeJob(row: JobRow): Job {
     const metadata = this.deserializeMetadata(row.metadata);
 
+    // id / queue_id / lease_seq are BIGINT. connection.ts registers an INT8
+    // parser on this package's `pg`, but a caller-supplied client may come from
+    // a different copy of pg and hand back strings — and `lease_seq + 1` on a
+    // string is concatenation, which silently breaks lease fencing.
     return {
-      id: row.id,
+      id: Number(row.id),
       idempotencyKey: row.idempotency_key,
       payload: row.payload,
-      queueShardNo: row.queue_shard_no,
+      queueShardNo: row.queue_shard_no === null ? null : Number(row.queue_shard_no),
       status: row.status as JobStatus,
       groupId: row.group_id,
-      queueId: row.queue_id,
+      queueId: Number(row.queue_id),
       attempts: row.attempts,
       metadata,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: null,              // active jobs are never completed
       leaseExpiresAt: row.lease_expires_at,
-      lockSeq: row.lease_seq,
+      lockSeq: row.lease_seq === null ? null : Number(row.lease_seq),
     };
   }
 

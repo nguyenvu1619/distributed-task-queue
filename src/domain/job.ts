@@ -42,3 +42,16 @@ export interface CreateJobInput {
   group?: Group;
 }
 
+
+/**
+ * What a publish returns. Extends `Job` so it is usable anywhere a `Job` is,
+ * and carries whether the row was newly inserted or an existing live job with
+ * the same idempotency key was returned instead.
+ *
+ * Note: an idempotency key is only reserved while the job is alive. Terminal
+ * jobs are deleted, which frees the key — dedup protects against a double
+ * publish, not against re-publishing work that has already run.
+ */
+export interface PublishedJob extends Job {
+  deduplicated: boolean;
+}
