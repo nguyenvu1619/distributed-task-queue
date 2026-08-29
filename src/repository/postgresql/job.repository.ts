@@ -594,6 +594,81 @@ export class JobRepository {
   }
 
   // ---------------------------------------------------------------------------
+  // Discard job
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Removes a job without spending an attempt or scheduling a retry.
+   *
+   * This is the poison-message path: a payload that cannot be deserialized will
+   * fail identically on every redelivery, so routing it through failJob would
+   * only burn the attempt budget one useless run at a time. The job is deleted,
+   * exactly as the attempt-exhausted paths already do, and any coordination
+   * slots it held are released.
+   */
+  async discardJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+    if (this.isFastPath(queue)) {
+      const result = await this.pool.query(
+        `DELETE FROM jobs
+         WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
+         RETURNING ${JOB_COLUMNS}`,
+        [id, lockSeq]
+      );
+
+      if (result.rows.length === 0) {
+        throw new NotFoundError(
+          `Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`
+        );
+      }
+
+      return this.asDiscarded(this.deserializeJob(result.rows[0] as JobRow));
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const jobResult = await client.query(
+        `SELECT ${JOB_COLUMNS}
+         FROM jobs WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING' FOR UPDATE`,
+        [id, lockSeq]
+      );
+
+      if (jobResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        throw new NotFoundError(
+          `Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`
+        );
+      }
+
+      const job = this.deserializeJob(jobResult.rows[0] as JobRow);
+
+      await this.releaseCoordinationSlots(client, queue.id, job.queueShardNo, job.groupId);
+      await client.query(`DELETE FROM jobs WHERE id = $1`, [id]);
+      await client.query('COMMIT');
+
+      return this.asDiscarded(job);
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {
+        // Already rolled back above on the not-found path; the original error wins.
+      });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private asDiscarded(job: Job): Job {
+    return {
+      ...job,
+      status: JobStatus.FAILED,
+      completedAt: new Date(),
+      lockSeq: null,
+      leaseExpiresAt: null,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Reaper
   // ---------------------------------------------------------------------------
 
