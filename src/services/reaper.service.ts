@@ -21,8 +21,9 @@ export class ReaperService {
     this.batchSize = options.batchSize || 100;
   }
 
+
   async runOnce(): Promise<number[]> {
-    return this.jobRepo.recoverJobs();
+    return this.jobRepo.recoverJobs(this.batchSize);
   }
 
   start(): void {

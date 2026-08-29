@@ -1,4 +1,10 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolConfig, types } from 'pg';
+
+// node-postgres returns BIGINT (int8) as a string to avoid precision loss above
+// 2^53. Every 64-bit column in this schema — job/queue ids, lease_seq,
+// lease_duration in nanoseconds — is far below that, and the domain models type
+// them as `number`. Without this, `lease_seq + 1` is string concatenation.
+types.setTypeParser(types.builtins.INT8, (value) => parseInt(value, 10));
 
 export interface DatabaseConfig {
   host: string;
