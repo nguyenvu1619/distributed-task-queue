@@ -428,7 +428,8 @@ export class JobRepository {
 
   /**
    * Deletes a settled job and gives back its shard / group slots in one
-   * statement.
+   * statement. Shared by complete (fence-checked success) and discard (poison
+   * removal) — the SQL is identical, only the returned Job shape differs.
    *
    * Slot release is chained shard-then-group via the `shard_release` reference:
    * independent data-modifying CTEs run in unspecified order, and releasing in
@@ -624,6 +625,57 @@ export class JobRepository {
       return this.failJobFast(id, lockSeq, queue);
     }
     return this.failJobWithCoordination(id, lockSeq, queue);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Discard job
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Removes a job without spending an attempt or scheduling a retry.
+   *
+   * This is the poison-message path: a payload that cannot be deserialized will
+   * fail identically on every redelivery, so routing it through failJob would
+   * only burn the attempt budget one useless run at a time. The job is deleted,
+   * exactly as the attempt-exhausted paths already do, and any coordination
+   * slots it held are released.
+   */
+  async discardJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+    if (this.isFastPath(queue)) {
+      const result = await this.pool.query(
+        `DELETE FROM jobs
+         WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
+         RETURNING ${JOB_COLUMNS}`,
+        [id, lockSeq]
+      );
+
+      if (result.rows.length === 0) {
+        throw new NotFoundError(
+          `Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`
+        );
+      }
+
+      return this.asDiscarded(this.deserializeJob(result.rows[0] as JobRow));
+    }
+
+    const row = await this.deleteWithCoordination(id, lockSeq, queue);
+    if (!row) {
+      throw new NotFoundError(
+        `Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`
+      );
+    }
+
+    return this.asDiscarded(this.deserializeJob(row));
+  }
+
+  private asDiscarded(job: Job): Job {
+    return {
+      ...job,
+      status: JobStatus.FAILED,
+      completedAt: new Date(),
+      lockSeq: null,
+      leaseExpiresAt: null,
+    };
   }
 
   // ---------------------------------------------------------------------------
