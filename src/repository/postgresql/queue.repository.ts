@@ -1,7 +1,12 @@
 import { Pool } from 'pg';
-import { Queue, CreateQueueInput, NUMBER_OF_SHARD, QueueShards } from '../../domain/queue';
+import { Queue, CreateQueueInput, NUMBER_OF_SHARD } from '../../domain/queue';
 import { NotFoundError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
+
+const QUEUE_COLUMNS = `id, name, max_attempts, lease_duration, concurrency, requires_group_id,
+         created_at, updated_at`;
+
+const UNIQUE_VIOLATION = '23505';
 
 // Database row interface (snake_case)
 interface QueueRow {
@@ -17,11 +22,98 @@ interface QueueRow {
 
 export class QueueRepository {
   private cache: Map<number, Queue> = new Map();
+  private cacheByName: Map<string, Queue> = new Map();
 
   constructor(
     private pool: Pool,
     private logger: Logger = consoleLogger
   ) {}
+
+  private remember(queue: Queue): Queue {
+    this.cache.set(queue.id, queue);
+    this.cacheByName.set(queue.name, queue);
+    return queue;
+  }
+
+  async getByName(name: string): Promise<Queue | null> {
+    const cached = this.cacheByName.get(name);
+    if (cached) {
+      return cached;
+    }
+
+    const result = await this.pool.query(
+      `SELECT ${QUEUE_COLUMNS} FROM queues WHERE name = $1`,
+      [name]
+    );
+
+    if (result.rows.length === 0) {
+      return null;
+    }
+
+    return this.remember(this.deserializeQueue(result.rows[0] as QueueRow));
+  }
+
+  /**
+   * Get-or-create by name. Two processes booting at once both call this, so the
+   * loser of the INSERT race re-reads the winner's row instead of failing.
+   *
+   * Deliberately does not accept a caller transaction: createQueue issues
+   * `SET TRANSACTION ISOLATION LEVEL`, which Postgres rejects (25001) once any
+   * statement has run in the enclosing transaction. Only publishing is
+   * transaction-joinable.
+   */
+  async ensureQueue(input: CreateQueueInput): Promise<Queue> {
+    const existing = await this.getByName(input.name);
+    if (existing) {
+      this.warnOnConfigDrift(existing, input);
+      return existing;
+    }
+
+    try {
+      return await this.createQueue(input);
+    } catch (error) {
+      if ((error as { code?: string }).code !== UNIQUE_VIOLATION) {
+        throw error;
+      }
+      // A concurrent creator won. Their configuration is now the queue's.
+      const winner = await this.getByName(input.name);
+      if (!winner) {
+        throw error;
+      }
+      this.warnOnConfigDrift(winner, input);
+      return winner;
+    }
+  }
+
+  /**
+   * Queue configuration is immutable in v1 — there is no update path — so a
+   * mismatch between the stored queue and what the caller asked for is silently
+   * ignored unless we say something.
+   */
+  private warnOnConfigDrift(existing: Queue, requested: CreateQueueInput): void {
+    const drift: string[] = [];
+    if (existing.maxAttempts !== requested.maxAttempts) {
+      drift.push(`maxAttempts ${existing.maxAttempts} != ${requested.maxAttempts}`);
+    }
+    if (existing.leaseDuration !== requested.leaseDuration) {
+      drift.push(`leaseDuration ${existing.leaseDuration} != ${requested.leaseDuration}`);
+    }
+    if ((existing.concurrency ?? 0) !== requested.concurrency) {
+      drift.push(`concurrency ${existing.concurrency} != ${requested.concurrency}`);
+    }
+    if (existing.requiresGroupId !== (requested.requiresGroupId ?? false)) {
+      drift.push(
+        `requiresGroupId ${existing.requiresGroupId} != ${requested.requiresGroupId ?? false}`
+      );
+    }
+
+    if (drift.length > 0) {
+      this.logger.warn(
+        `Queue "${existing.name}" already exists with a different configuration ` +
+          `(${drift.join(', ')}). Queue configuration is immutable; the stored values are in effect.`
+      );
+    }
+  }
 
   async getById(id: number): Promise<Queue> {
     // Check cache first
@@ -40,9 +132,7 @@ export class QueueRepository {
       throw new NotFoundError(`Queue with id ${id} not found`);
     }
 
-    const queue = this.deserializeQueue(result.rows[0] as QueueRow);
-    this.cache.set(id, queue);
-    return queue;
+    return this.remember(this.deserializeQueue(result.rows[0] as QueueRow));
   }
 
   async getAll(): Promise<Queue[]> {
@@ -53,9 +143,7 @@ export class QueueRepository {
     const queues = result.rows.map((row) => this.deserializeQueue(row as QueueRow));
     
     // Update cache
-    queues.forEach((queue) => {
-      this.cache.set(queue.id, queue);
-    });
+    queues.forEach((queue) => this.remember(queue));
 
     return queues;
   }
@@ -106,10 +194,9 @@ export class QueueRepository {
 
       await client.query('COMMIT');
 
-      // Update cache
-      this.cache.set(queue.id, queue);
-
-      return queue;
+      // Cached only after COMMIT: an aborted create must not leave a phantom
+      // queue memoised in-process.
+      return this.remember(queue);
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
