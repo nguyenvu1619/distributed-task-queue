@@ -62,14 +62,16 @@ function recordingExecutor(pool: Pool): { statements: string[]; query: Pool['que
   return {
     statements,
     query: ((text: string, values?: any[]) => {
-      statements.push(text.trim().split('\n')[0]);
+      statements.push(text.trim());
       return pool.query(text, values);
     }) as Pool['query'],
   };
 }
 
+// Matched anywhere in the statement, not anchored: the insert arrives inside
+// a `WITH ins AS (INSERT INTO jobs …)` when group-limit seeding rides along.
 const insertsIntoJobs = (statements: string[]): number =>
-  statements.filter((sql) => /^INSERT INTO jobs\b/i.test(sql)).length;
+  statements.filter((sql) => /\bINSERT INTO jobs\b/i.test(sql)).length;
 
 /**
  * `bytes` ASCII characters with no structure for pglz to find.
