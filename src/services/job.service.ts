@@ -1,6 +1,7 @@
 import { JobRepository } from '../repository/postgresql/job.repository';
 import { QueueRepository } from '../repository/postgresql/queue.repository';
 import { Job, JobStatus, CreateJobInput } from '../domain/job';
+import { Queue } from '../domain/queue';
 
 export class JobService {
   constructor(
@@ -20,21 +21,42 @@ export class JobService {
     return this.jobRepo.pullJobs(status, limit);
   }
 
+  async getQueue(queueId: number): Promise<Queue> {
+    return this.queueRepo.getById(queueId);
+  }
+
+  // Requires a queue lookup on every call — use when the queue object is not cached locally.
   async pullJob(queueId: number): Promise<Job | null> {
     const queue = await this.queueRepo.getById(queueId);
     return this.jobRepo.pullJob(queue);
   }
 
-  async completeJob(id: number, lockToken: number): Promise<Job> {
-    const job = await this.jobRepo.getById(id);
-    const queue = await this.queueRepo.getById(job.queueId);
-    return this.jobRepo.completeJob(id, lockToken, queue);
+  // Pass a pre-resolved Queue to skip the per-call queue lookup.
+  async pullJobDirect(queue: Queue): Promise<Job | null> {
+    return this.jobRepo.pullJob(queue);
   }
 
-  async failJob(id: number, lockToken: number): Promise<Job> {
+  // Requires two extra lookups (job + queue) on every call.
+  async completeJob(id: number, lockSeq: number): Promise<Job> {
     const job = await this.jobRepo.getById(id);
     const queue = await this.queueRepo.getById(job.queueId);
-    return this.jobRepo.failJob(id, lockToken, queue);
+    return this.jobRepo.completeJob(id, lockSeq, queue);
+  }
+
+  // Pass a pre-resolved Queue to skip both lookups.
+  async completeJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+    return this.jobRepo.completeJob(id, lockSeq, queue);
+  }
+
+  // Requires two extra lookups (job + queue) on every call.
+  async failJob(id: number, lockSeq: number): Promise<Job> {
+    const job = await this.jobRepo.getById(id);
+    const queue = await this.queueRepo.getById(job.queueId);
+    return this.jobRepo.failJob(id, lockSeq, queue);
+  }
+
+  // Pass a pre-resolved Queue to skip both lookups.
+  async failJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+    return this.jobRepo.failJob(id, lockSeq, queue);
   }
 }
-
