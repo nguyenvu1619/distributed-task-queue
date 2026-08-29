@@ -10,7 +10,6 @@ export { createPool, DatabaseConfig } from './repository/postgresql/connection';
 // Domain exports
 export * from './domain/job';
 export * from './domain/queue';
-export * from './domain/group';
 export * from './domain/errors';
 
 // Re-export Pool from pg for convenience

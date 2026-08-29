@@ -16,7 +16,7 @@ export interface Job {
   idempotencyKey: string;
   payload: string;
   status: JobStatus;
-  groupId: string;
+  groupId: string | null;
   attempts: number;
   metadata: Metadata;
   createdAt: Date;
@@ -24,15 +24,21 @@ export interface Job {
   completedAt: Date | null;
   leaseExpiresAt: Date | null;
   queueId: number;
-  lockToken: number;
+  lockSeq: number | null;
+  queueShardNo: number | null;
+}
+
+export interface Group{
+    id: string;
+    concurrency: number;
 }
 
 export interface CreateJobInput {
   idempotencyKey: string;
   payload: string;
-  groupId: string;
   queueId: number;
   attempts?: number;
   metadata?: Metadata;
+  group?: Group;
 }
 
