@@ -16,7 +16,7 @@ publish: join the caller's transaction, batch, and deduplicate
 
 ---
 
-`publishJob(input, executor?)` joins a caller-owned transaction — job and business writes commit together, no outbox table. Adds batch publish and turns a duplicate key into a dedup rather than an error.
+`publishJob(input, executor?)` joins a caller-owned transaction — job and business writes commit together, no outbox table. Adds batch publish and turns a duplicate key into a dedup rather than an error. A standalone publish stays one statement — the group-limit seeding rides in a CTE with the INSERT — so it opens no transaction of its own.
 
 **Check:**
 - **Blocker** — `idempotency_key` is UNIQUE across the *whole* table, but the read-back after `ON CONFLICT DO NOTHING` filters on the key alone with **no `queue_id` predicate**. Publishing `order-123` to queue B while it's live on queue A inserts nothing and returns queue A's job with `deduplicated: true`. A publish that silently vanishes. Needs per-`(queue_id, idempotency_key)` uniqueness plus a `queue_id` filter.
