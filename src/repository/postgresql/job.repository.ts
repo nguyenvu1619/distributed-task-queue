@@ -4,11 +4,27 @@ import { Queue } from '../../domain/queue';
 import { ConflictError, NotFoundError } from '../../domain/errors';
 import { Executor } from '../../domain/executor';
 import { Logger, consoleLogger } from '../../domain/logger';
+import { JOB_CHANNEL_PREFIX } from './notifier';
 
 // Every read of an active job returns the same projection.
 const JOB_COLUMNS = `id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
          attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at`;
 
+/**
+ * Announces that a queue has work, so workers parked on their poll interval
+ * wake now rather than up to `pollInterval` later.
+ *
+ * It rides along in the statement that made the row pullable rather than being
+ * a call of its own: that costs no extra round trip, and NOTIFY is
+ * transactional, so the announcement lands exactly when the row becomes visible
+ * to a puller — after the caller's COMMIT for a transactional publish, and never
+ * at all if they roll back. Postgres folds duplicate (channel, payload) pairs
+ * within a transaction into one event, so a thousand-row batch wakes a worker
+ * once.
+ *
+ * PgNotifier is the consuming half; the channel names have to match.
+ */
+const NOTIFY_QUEUE = `pg_notify('${JOB_CHANNEL_PREFIX}' || queue_id, '')`;
 
 // Database row interface for the active jobs table (snake_case)
 // Note: completed_at is not stored — completed/failed jobs are deleted
@@ -141,7 +157,7 @@ export class JobRepository {
          INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
          VALUES ${placeholders.join(', ')}
          ON CONFLICT (idempotency_key) DO NOTHING
-         RETURNING ${JOB_COLUMNS}
+         RETURNING ${JOB_COLUMNS}, ${NOTIFY_QUEUE}
        )${limitsCte}
        SELECT * FROM ins`,
       values
@@ -505,13 +521,14 @@ export class JobRepository {
     // it is the fence token, and the next lease must out-rank the one that just
     // failed so a late settle from this worker is refused.
     // Retry and discard are disjoint on the attempts budget, so both branches
-    // ride in one statement and at most one touches the row.
+    // ride in one statement and at most one touches the row. The notify fires
+    // inside the retried CTE's RETURNING, so only a retry wakes workers.
     const result = await this.pool.query(
       `WITH retried AS (
          UPDATE jobs
          SET status = 'PENDING', lease_expires_at = NULL, updated_at = now()
          WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING' AND attempts < $3
-         RETURNING ${JOB_COLUMNS}
+         RETURNING ${JOB_COLUMNS}, ${NOTIFY_QUEUE}
        ),
        removed AS (
          DELETE FROM jobs
@@ -550,7 +567,8 @@ export class JobRepository {
    * The retry keeps lease_seq (the fence token — the next lease must out-rank
    * a late settle from this worker) and clears queue_shard_no because the slot
    * has been given back. Retry and discard are disjoint on the attempts budget,
-   * so at most one branch touches the row. group_release references
+   * so at most one branch touches the row. The notify rides in the retried
+   * CTE's RETURNING, so only a retry wakes workers. group_release references
    * shard_release to pin shard-then-group order — see deleteWithCoordination.
    * Use when queue.concurrency > 0 OR queue.requiresGroupId === true
    */
@@ -584,7 +602,7 @@ export class JobRepository {
          SET status = 'PENDING', lease_expires_at = NULL, queue_shard_no = NULL, updated_at = now()
          FROM victim v
          WHERE j.id = v.job_id AND v.spent < $4
-         RETURNING ${JOB_COLUMNS}
+         RETURNING ${JOB_COLUMNS}, ${NOTIFY_QUEUE}
        ),
        removed AS (
          DELETE FROM jobs j
@@ -760,7 +778,7 @@ export class JobRepository {
              updated_at = now()
          FROM victims v
          WHERE j.id = v.job_id AND v.spent < v.budget
-         RETURNING j.id
+         RETURNING j.id, ${NOTIFY_QUEUE}
        )
        SELECT r.id FROM retried r`,
       [limit]
