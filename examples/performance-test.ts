@@ -1,12 +1,12 @@
-import {
-  createPool,
-  JobService,
-  QueueService,
-  JobRepository,
-  QueueRepository,
-  WorkerService,
-  Job,
-} from '../src/index';
+// Benchmarks drive the repositories and services directly, below the public
+// TaskQueue facade, so they measure the storage layer rather than the client.
+import { createPool } from '../src/repository/postgresql/connection';
+import { JobRepository } from '../src/repository/postgresql/job.repository';
+import { QueueRepository } from '../src/repository/postgresql/queue.repository';
+import { JobService } from '../src/services/job.service';
+import { QueueService } from '../src/services/queue.service';
+import { WorkerService } from '../src/services/worker.service';
+import { Job } from '../src/domain/job';
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 

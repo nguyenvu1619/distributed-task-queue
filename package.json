@@ -30,7 +30,8 @@
     "perf:latency": "ts-node examples/latency-test.ts",
     "perf:load": "ts-node examples/performance-test.ts",
     "perf:all": "ts-node examples/perfTest.ts all",
-    "perfTest": "ts-node examples/perfTest.ts"
+    "perfTest": "ts-node examples/perfTest.ts",
+    "example:tx": "ts-node examples/transactional-publish.ts"
   },
   "keywords": [
     "task-queue",
