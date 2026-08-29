@@ -2,6 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
 import { Queue } from '../../domain/queue';
 import { NotFoundError } from '../../domain/errors';
+import { Logger, consoleLogger } from '../../domain/logger';
 
 // Database row interface for the active jobs table (snake_case)
 // Note: completed_at is not stored — completed/failed jobs are deleted
@@ -23,7 +24,10 @@ interface JobRow {
 
 
 export class JobRepository {
-  constructor(private pool: Pool) {}
+  constructor(
+    private pool: Pool,
+    private logger: Logger = consoleLogger
+  ) {}
 
   async getById(id: number): Promise<Job> {
     const result = await this.pool.query(
@@ -71,7 +75,7 @@ export class JobRepository {
       await client.query('COMMIT');
       return this.deserializeJob(publishResult.rows[0] as JobRow);
     } catch (error) {
-      console.error(error);
+      this.logger.error('Failed to publish a job', error);
       await client.query('ROLLBACK');
       throw error;
     } finally {
@@ -139,7 +143,7 @@ export class JobRepository {
         );
         if (queueShardResult.rows.length === 0) {
           await client.query('ROLLBACK');
-          console.warn(`No available queue shard for queue ${queue.id}`);
+          this.logger.warn(`No available queue shard for queue ${queue.id}`);
           return null;
         }
         shareNo = queueShardResult.rows[0].shard_no;
@@ -171,7 +175,9 @@ export class JobRepository {
         );
         if (groupQueueLimitResult.rows.length === 0) {
           await client.query('ROLLBACK');
-          console.warn(`Group queue limit reached for group ${job.groupId} and queue ${queue.id}`);
+          this.logger.warn(
+            `Group queue limit reached for group ${job.groupId} and queue ${queue.id}`
+          );
           return null;
         }
       }
@@ -209,7 +215,7 @@ export class JobRepository {
       return this.deserializeJob(leased.rows[0] as JobRow);
     } catch (error) {
       await client.query('ROLLBACK');
-      console.error('error', error);
+      this.logger.error('Failed to pull a job with coordination', error);
       throw error;
     } finally {
       client.release();
