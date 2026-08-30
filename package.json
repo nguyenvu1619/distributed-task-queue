@@ -7,6 +7,10 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:external": "TEST_PG_EXTERNAL=1 vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "migrate:up": "ts-node src/migration/runner.ts up",
     "migrate:down": "ts-node src/migration/runner.ts down",
     "example:producer": "ts-node examples/producer.ts",
