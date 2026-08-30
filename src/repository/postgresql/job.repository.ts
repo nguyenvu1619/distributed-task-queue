@@ -2,6 +2,7 @@ import { Pool } from 'pg';
 import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
 import { Queue } from '../../domain/queue';
 import { NotFoundError } from '../../domain/errors';
+import { Logger, consoleLogger } from '../../domain/logger';
 
 // Every read of an active job returns the same projection.
 const JOB_COLUMNS = `id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
@@ -28,7 +29,10 @@ interface JobRow {
 
 
 export class JobRepository {
-  constructor(private pool: Pool) {}
+  constructor(
+    private pool: Pool,
+    private logger: Logger = consoleLogger
+  ) {}
 
   async getById(id: number): Promise<Job> {
     const result = await this.pool.query(
@@ -233,9 +237,11 @@ export class JobRepository {
       return this.deserializeJob(row as JobRow);
     }
     if (!row.has_shard) {
-      console.warn(`No available queue shard for queue ${queue.id}`);
+      this.logger.warn(`No available queue shard for queue ${queue.id}`);
     } else if (row.candidate_group !== null && !row.group_admitted) {
-      console.warn(`Group queue limit reached for group ${row.candidate_group} and queue ${queue.id}`);
+      this.logger.warn(
+        `Group queue limit reached for group ${row.candidate_group} and queue ${queue.id}`
+      );
     }
     return null;
   }
