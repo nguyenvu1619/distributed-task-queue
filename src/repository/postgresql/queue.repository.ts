@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { Queue, CreateQueueInput, NUMBER_OF_SHARD, QueueShards } from '../../domain/queue';
-import { NotFoundError } from '../../domain/errors';
+import { QueueNotFoundError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
 
 // Database row interface (snake_case)
@@ -37,7 +37,7 @@ export class QueueRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Queue with id ${id} not found`);
+      throw new QueueNotFoundError(id);
     }
 
     const queue = this.deserializeQueue(result.rows[0] as QueueRow);

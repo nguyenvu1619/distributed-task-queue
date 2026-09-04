@@ -1,7 +1,11 @@
 import { Pool, PoolClient } from 'pg';
 import { Job, JobStatus, CreateJobInput, Metadata, PublishedJob } from '../../domain/job';
 import { Queue } from '../../domain/queue';
-import { ConflictError, NotFoundError } from '../../domain/errors';
+import {
+  JobNotFoundError,
+  LeaseLostError,
+  PublishConflictError,
+} from '../../domain/errors';
 import { Executor } from '../../domain/executor';
 import { Logger, consoleLogger } from '../../domain/logger';
 
@@ -84,7 +88,7 @@ export class JobRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Job with id ${id} not found`);
+      throw new JobNotFoundError(id);
     }
 
     return this.deserializeJob(result.rows[0] as JobRow);
@@ -95,7 +99,7 @@ export class JobRepository {
    * `query(text, values)` — to enqueue inside a transaction the caller owns.
    */
   async publishJob(input: CreateJobInput, executor?: Executor): Promise<PublishedJob> {
-    const [job] = await this.publishJobs([input], executor);
+    const [job] = await this.publish([input], executor, 'publishJob');
     return job;
   }
 
@@ -104,6 +108,14 @@ export class JobRepository {
    * than N connections each doing BEGIN/INSERT/COMMIT.
    */
   async publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<PublishedJob[]> {
+    return this.publish(inputs, executor, 'publishJobs');
+  }
+
+  private async publish(
+    inputs: CreateJobInput[],
+    executor: Executor | undefined,
+    operation: 'publishJob' | 'publishJobs'
+  ): Promise<PublishedJob[]> {
     if (inputs.length === 0) {
       return [];
     }
@@ -111,12 +123,16 @@ export class JobRepository {
     // nothing but two extra round trips.
     const needsTransaction = inputs.some((input) => input.group?.id && input.group?.concurrency);
     if (!executor && !needsTransaction) {
-      return this.insertJobs(this.pool, inputs);
+      return this.insertJobs(this.pool, inputs, operation);
     }
-    return this.withExecutor(executor, (db) => this.insertJobs(db, inputs));
+    return this.withExecutor(executor, (db) => this.insertJobs(db, inputs, operation));
   }
 
-  private async insertJobs(db: Executor, inputs: CreateJobInput[]): Promise<PublishedJob[]> {
+  private async insertJobs(
+    db: Executor,
+    inputs: CreateJobInput[],
+    operation: 'publishJob' | 'publishJobs'
+  ): Promise<PublishedJob[]> {
     const placeholders: string[] = [];
     const values: any[] = [];
 
@@ -198,9 +214,7 @@ export class JobRepository {
         // a concurrent publisher under REPEATABLE READ, or the conflicting job
         // reached a terminal state and was deleted in between. Typed error, and
         // the caller's transaction is still usable.
-        throw new ConflictError(
-          `Job with idempotency key ${input.idempotencyKey} conflicts with a concurrent publish`
-        );
+        throw new PublishConflictError(input.idempotencyKey, operation);
       }
       // Second and later occurrences of a key within one batch are duplicates
       // of the row this same call just inserted.
@@ -398,7 +412,7 @@ export class JobRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+      throw new LeaseLostError(id, lockSeq, 'completeJob');
     }
 
     const completedAt = new Date();
@@ -430,7 +444,7 @@ export class JobRepository {
 
       if (jobResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+        throw new LeaseLostError(id, lockSeq, 'completeJob');
       }
 
       const jobRow = jobResult.rows[0] as JobRow;
@@ -508,7 +522,7 @@ export class JobRepository {
     );
 
     if (discarded.rows.length === 0) {
-      throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+      throw new LeaseLostError(id, lockSeq, 'failJob');
     }
 
     return {
@@ -539,7 +553,7 @@ export class JobRepository {
 
       if (jobResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+        throw new LeaseLostError(id, lockSeq, 'failJob');
       }
 
       const jobRow = jobResult.rows[0] as JobRow;

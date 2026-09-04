@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { JobStatus } from '../src/domain/job';
 import { CreateQueueInput, NUMBER_OF_SHARD } from '../src/domain/queue';
-import { NotFoundError } from '../src/domain/errors';
+import { ErrorCodes } from '../src/domain/errors';
 import {
   Harness,
   createHarness,
@@ -64,7 +64,9 @@ describe('queue lifecycle', () => {
   });
 
   it('rejects a lookup for an unknown queue', async () => {
-    await expect(h.queueService.getQueue(999_999)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(h.queueService.getQueue(999_999)).rejects.toMatchObject({
+      code: ErrorCodes.QUEUE_NOT_FOUND,
+    });
   });
 
   it('lists queues', async () => {
@@ -177,7 +179,7 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
 
     await expect(
       h.jobRepo.completeJob(pulled!.id, Number(pulled!.lockSeq) + 99, queue)
-    ).rejects.toBeInstanceOf(NotFoundError);
+    ).rejects.toMatchObject({ code: ErrorCodes.LEASE_LOST, retryable: false });
 
     // ...and the job is untouched by the rejected attempt.
     const row = await readJobRow(h.pool, pulled!.id);
@@ -190,18 +192,51 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     const pulled = await h.jobRepo.pullJob(queue);
 
     await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+
+    // LEASE_LOST rather than JOB_NOT_FOUND, deliberately. The first settle DELETEd
+    // the row, so the second one's predicate matches nothing — but the settle cannot
+    // tell "row gone" from "another worker holds it" without a second probe, and both
+    // mean the same thing to the caller: this job is not yours, abandon it.
     await expect(
       h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue)
-    ).rejects.toBeInstanceOf(NotFoundError);
+    ).rejects.toMatchObject({ code: ErrorCodes.LEASE_LOST });
+  });
+
+  // The settle path resolves the queue with a getById first. That lookup missing must
+  // NOT surface as JOB_NOT_FOUND, or the fencing race would report one code through
+  // JobService and another through the *Direct methods for the very same event.
+  it('reports a lost lease, not a missing job, when settling through JobService', async () => {
+    const queue = await fastQueue();
+    await h.jobRepo.publishJob(jobInput(queue.id));
+    const pulled = await h.jobRepo.pullJob(queue);
+
+    // Settling deletes the row, so the second attempt's pre-flight lookup misses.
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+
+    await expect(
+      h.jobService.completeJob(pulled!.id, Number(pulled!.lockSeq))
+    ).rejects.toMatchObject({
+      code: ErrorCodes.LEASE_LOST,
+      context: { operation: 'completeJob' },
+    });
+
+    await expect(
+      h.jobService.failJob(pulled!.id, Number(pulled!.lockSeq))
+    ).rejects.toMatchObject({
+      code: ErrorCodes.LEASE_LOST,
+      context: { operation: 'failJob' },
+    });
   });
 
   it('rejects settling a job that was never pulled', async () => {
     const queue = await fastQueue();
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
 
-    await expect(h.jobRepo.completeJob(published.id, 1, queue)).rejects.toBeInstanceOf(
-      NotFoundError
-    );
+    // The row exists and no lease was ever taken, so LEASE_LOST reads here as
+    // "you do not hold this job's lease" rather than "your lease was taken".
+    await expect(h.jobRepo.completeJob(published.id, 1, queue)).rejects.toMatchObject({
+      code: ErrorCodes.LEASE_LOST,
+    });
   });
 
   it('does not retain terminal jobs — getById after completion is a miss', async () => {
@@ -212,7 +247,9 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
 
     // Characterisation, not a requirement: there is no `job_status` archive in
     // the current schema, so terminal jobs are simply gone. See test report.
-    await expect(h.jobRepo.getById(pulled!.id)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(h.jobRepo.getById(pulled!.id)).rejects.toMatchObject({
+      code: ErrorCodes.JOB_NOT_FOUND,
+    });
   });
 });
 

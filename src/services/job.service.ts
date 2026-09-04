@@ -3,6 +3,7 @@ import { QueueRepository } from '../repository/postgresql/queue.repository';
 import { Job, JobStatus, CreateJobInput, PublishedJob } from '../domain/job';
 import { Executor } from '../domain/executor';
 import { Queue } from '../domain/queue';
+import { ErrorCodes, LeaseLostError, isTaskQueueError } from '../domain/errors';
 
 export class JobService {
   constructor(
@@ -43,7 +44,7 @@ export class JobService {
 
   // Requires two extra lookups (job + queue) on every call.
   async completeJob(id: number, lockSeq: number): Promise<Job> {
-    const job = await this.jobRepo.getById(id);
+    const job = await this.resolveForSettle(id, lockSeq, 'completeJob');
     const queue = await this.queueRepo.getById(job.queueId);
     return this.jobRepo.completeJob(id, lockSeq, queue);
   }
@@ -55,7 +56,7 @@ export class JobService {
 
   // Requires two extra lookups (job + queue) on every call.
   async failJob(id: number, lockSeq: number): Promise<Job> {
-    const job = await this.jobRepo.getById(id);
+    const job = await this.resolveForSettle(id, lockSeq, 'failJob');
     const queue = await this.queueRepo.getById(job.queueId);
     return this.jobRepo.failJob(id, lockSeq, queue);
   }
@@ -63,5 +64,27 @@ export class JobService {
   // Pass a pre-resolved Queue to skip both lookups.
   async failJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
     return this.jobRepo.failJob(id, lockSeq, queue);
+  }
+
+  /**
+   * Resolves the job a settle refers to. This lookup exists only to find the queue,
+   * so a miss must not surface as JOB_NOT_FOUND: the caller presented a lease, and a
+   * settle whose row has gone is a lost lease — the winner deleted it on its way out.
+   * Without this the fencing race would report LEASE_LOST through the *Direct methods
+   * and JOB_NOT_FOUND through these, for the same event.
+   */
+  private async resolveForSettle(
+    id: number,
+    lockSeq: number,
+    operation: 'completeJob' | 'failJob'
+  ): Promise<Job> {
+    try {
+      return await this.jobRepo.getById(id);
+    } catch (error) {
+      if (isTaskQueueError(error) && error.code === ErrorCodes.JOB_NOT_FOUND) {
+        throw new LeaseLostError(id, lockSeq, operation);
+      }
+      throw error;
+    }
   }
 }
