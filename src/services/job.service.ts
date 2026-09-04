@@ -1,0 +1,90 @@
+import { JobRepository } from '../repository/postgresql/job.repository';
+import { QueueRepository } from '../repository/postgresql/queue.repository';
+import { Job, JobStatus, CreateJobInput, PublishedJob } from '../domain/job';
+import { Executor } from '../domain/executor';
+import { Queue } from '../domain/queue';
+import { ErrorCodes, LeaseLostError, isTaskQueueError } from '../domain/errors';
+
+export class JobService {
+  constructor(
+    private jobRepo: JobRepository,
+    private queueRepo: QueueRepository
+  ) {}
+
+  async getJob(id: number): Promise<Job> {
+    return this.jobRepo.getById(id);
+  }
+
+  async publishJob(input: CreateJobInput, executor?: Executor): Promise<PublishedJob> {
+    return this.jobRepo.publishJob(input, executor);
+  }
+
+  async publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<PublishedJob[]> {
+    return this.jobRepo.publishJobs(inputs, executor);
+  }
+
+  async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {
+    return this.jobRepo.pullJobs(status, limit);
+  }
+
+  async getQueue(queueId: number): Promise<Queue> {
+    return this.queueRepo.getById(queueId);
+  }
+
+  // Requires a queue lookup on every call — use when the queue object is not cached locally.
+  async pullJob(queueId: number): Promise<Job | null> {
+    const queue = await this.queueRepo.getById(queueId);
+    return this.jobRepo.pullJob(queue);
+  }
+
+  // Pass a pre-resolved Queue to skip the per-call queue lookup.
+  async pullJobDirect(queue: Queue): Promise<Job | null> {
+    return this.jobRepo.pullJob(queue);
+  }
+
+  // Requires two extra lookups (job + queue) on every call.
+  async completeJob(id: number, lockSeq: number): Promise<Job> {
+    const job = await this.resolveForSettle(id, lockSeq, 'completeJob');
+    const queue = await this.queueRepo.getById(job.queueId);
+    return this.jobRepo.completeJob(id, lockSeq, queue);
+  }
+
+  // Pass a pre-resolved Queue to skip both lookups.
+  async completeJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+    return this.jobRepo.completeJob(id, lockSeq, queue);
+  }
+
+  // Requires two extra lookups (job + queue) on every call.
+  async failJob(id: number, lockSeq: number): Promise<Job> {
+    const job = await this.resolveForSettle(id, lockSeq, 'failJob');
+    const queue = await this.queueRepo.getById(job.queueId);
+    return this.jobRepo.failJob(id, lockSeq, queue);
+  }
+
+  // Pass a pre-resolved Queue to skip both lookups.
+  async failJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+    return this.jobRepo.failJob(id, lockSeq, queue);
+  }
+
+  /**
+   * Resolves the job a settle refers to. This lookup exists only to find the queue,
+   * so a miss must not surface as JOB_NOT_FOUND: the caller presented a lease, and a
+   * settle whose row has gone is a lost lease — the winner deleted it on its way out.
+   * Without this the fencing race would report LEASE_LOST through the *Direct methods
+   * and JOB_NOT_FOUND through these, for the same event.
+   */
+  private async resolveForSettle(
+    id: number,
+    lockSeq: number,
+    operation: 'completeJob' | 'failJob'
+  ): Promise<Job> {
+    try {
+      return await this.jobRepo.getById(id);
+    } catch (error) {
+      if (isTaskQueueError(error) && error.code === ErrorCodes.JOB_NOT_FOUND) {
+        throw new LeaseLostError(id, lockSeq, operation);
+      }
+      throw error;
+    }
+  }
+}

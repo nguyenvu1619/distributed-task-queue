@@ -1,0 +1,56 @@
+{
+  "name": "distributed-task-queue",
+  "version": "1.0.0",
+  "description": "A lightweight TypeScript library for distributed task queue management",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:lifecycle": "vitest run tests/lifecycle.test.ts",
+    "test:concurrency": "vitest run tests/concurrency.property.test.ts",
+    "test:crash": "vitest run tests/crash-fencing.test.ts",
+    "test:external": "TEST_PG_EXTERNAL=1 vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "migrate:up": "ts-node src/migration/runner.ts up",
+    "migrate:down": "ts-node src/migration/runner.ts down",
+    "example:producer": "ts-node examples/producer.ts",
+    "example:worker": "ts-node examples/worker.ts",
+    "perf:test": "ts-node examples/performance-test.ts",
+    "perf:small": "NUM_JOBS=1000 NUM_WORKERS=10 ts-node examples/performance-test.ts",
+    "perf:medium": "NUM_JOBS=5000 NUM_WORKERS=50 ts-node examples/performance-test.ts",
+    "perf:large": "NUM_JOBS=10000 NUM_WORKERS=100 ts-node examples/performance-test.ts",
+    "perf:extreme": "NUM_JOBS=50000 NUM_WORKERS=200 ts-node examples/performance-test.ts",
+    "perf:mp": "ts-node examples/performance-test-multiprocess.ts",
+    "perf:mp:small": "NUM_JOBS=10000 NUM_WORKERS=100 NUM_PROCESSES=1 ts-node examples/performance-test-multiprocess.ts",
+    "perf:mp:large": "NUM_JOBS=100000 NUM_WORKERS=1000 NUM_PROCESSES=4 ts-node examples/performance-test-multiprocess.ts",
+    "perf:startup": "ts-node examples/startup-shutdown-test.ts",
+    "perf:latency": "ts-node examples/latency-test.ts",
+    "perf:load": "ts-node examples/performance-test.ts",
+    "perf:all": "ts-node examples/perfTest.ts all",
+    "perfTest": "ts-node examples/perfTest.ts"
+  },
+  "keywords": [
+    "task-queue",
+    "distributed",
+    "postgresql",
+    "job-queue"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^10.28.0",
+    "@types/node": "^20.10.0",
+    "@types/pg": "^8.10.9",
+    "testcontainers": "^10.28.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.7"
+  }
+}
