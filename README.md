@@ -228,6 +228,56 @@ Stops the reaper service.
 #### `runOnce(): Promise<number[]>`
 Manually run the reaper once. Returns array of recovered job IDs.
 
+## Error Handling
+
+Every error this library throws is a `TaskQueueError` carrying a stable `code` and a
+`retryable` flag. **Switch on `code`, not on the class** — `instanceof` silently returns
+false when two copies of this package end up in one dependency tree, and the string
+never does. `isTaskQueueError` is brand-based for the same reason.
+
+| Code | Meaning | `retryable` | What to do |
+|---|---|---|---|
+| `LEASE_LOST` | You do not hold this job's lease | `false` | Abandon the job. Do **not** settle it again. |
+| `JOB_NOT_FOUND` | No live job with that id | `false` | Nothing to act on — finished jobs are deleted. |
+| `QUEUE_NOT_FOUND` | No queue with that id | `false` | Fix the configuration; the id is wrong or the queue was never created. |
+| `PUBLISH_CONFLICT` | A publish could neither insert nor read back its key | `false` | Under REPEATABLE READ or stricter, retry the whole transaction; under READ COMMITTED an identical retry may succeed. |
+
+```typescript
+import { ErrorCodes, isTaskQueueError } from 'distributed-task-queue';
+
+try {
+  await jobService.completeJobDirect(job.id, job.lockSeq!, queue);
+} catch (error) {
+  if (isTaskQueueError(error) && error.code === ErrorCodes.LEASE_LOST) {
+    // Routine crash fencing: the lease expired and someone else owns the job now.
+    // It is not lost — the new owner or the reaper will drive it. Just move on.
+    logger.debug('lost lease', error.context);
+    return;
+  }
+  throw error;
+}
+```
+
+### `retryable` means one specific thing
+
+`retryable` says whether retrying the **identical call** could plausibly succeed. It does
+not mean the failure was harmless. Every code above is `false`, because each describes a
+state an identical retry cannot change — `LEASE_LOST` most of all: retrying a settle you
+were just fenced out of would be a correctness violation, not a recovery.
+
+When you pass your own `executor` to `publishJob`, the unit of retry is your whole
+transaction, never the single call.
+
+### Why a lost lease is not a "not found"
+
+The settle predicate is `id = $1 AND lease_seq = $2 AND status = 'PROCESSING'`. A zero-row
+result collapses several causes the database cannot separate: the lease expired and the
+reaper reclaimed the job, another worker re-leased it, the job was already settled
+(terminal jobs are deleted, leaving no tombstone), or the caller never held a lease at
+all. They share the only fact a caller can act on — **this job is not yours** — so they
+share one code. `JOB_NOT_FOUND` is reserved for a plain `getById` miss, where no lease
+was ever presented.
+
 ## Architecture
 
 The library follows Clean Architecture principles:
@@ -244,7 +294,7 @@ src/
 - `job.ts`: Job domain model and types
 - `queue.ts`: Queue domain model and types
 - `group.ts`: Group domain model
-- `errors.ts`: Custom error classes
+- `errors.ts`: `TaskQueueError` base, the `ErrorCodes` registry, and the typed errors
 
 ### Repository Layer
 - `job.repository.ts`: Job data access

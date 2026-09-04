@@ -64,4 +64,16 @@ export class JobService {
   async failJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
     return this.jobRepo.failJob(id, lockSeq, queue);
   }
+
+  // Removes a job without spending an attempt — the poison-message path.
+  async discardJob(id: number, lockSeq: number): Promise<Job> {
+    const job = await this.jobRepo.getById(id);
+    const queue = await this.queueRepo.getById(job.queueId);
+    return this.jobRepo.discardJob(id, lockSeq, queue);
+  }
+
+  // Pass a pre-resolved Queue to skip both lookups.
+  async discardJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+    return this.jobRepo.discardJob(id, lockSeq, queue);
+  }
 }
