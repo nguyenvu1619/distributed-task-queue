@@ -1,4 +1,4 @@
-import { BadParamInputError } from '../domain/errors';
+import { InvalidInputError } from '../domain/errors';
 
 /** Milliseconds, or a short form: `500ms`, `30s`, `5m`, `2h`, `1d`. */
 export type Duration = number | string;
@@ -14,14 +14,14 @@ const UNITS: Record<string, number> = {
 export function parseDuration(value: Duration): number {
   if (typeof value === 'number') {
     if (!Number.isFinite(value) || value < 0) {
-      throw new BadParamInputError(`Duration must be a non-negative number, got ${value}`);
+      throw new InvalidInputError(`Duration must be a non-negative number, got ${value}`);
     }
     return value;
   }
 
   const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)$/.exec(value.trim());
   if (!match) {
-    throw new BadParamInputError(
+    throw new InvalidInputError(
       `Cannot parse duration "${value}" — expected a number of milliseconds or a value like "30s", "5m", "2h"`
     );
   }

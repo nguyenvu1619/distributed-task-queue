@@ -3,7 +3,7 @@ import * as path from 'path';
 import { Pool, PoolClient } from 'pg';
 
 import { PublishedJob } from '../domain/job';
-import { BadParamInputError } from '../domain/errors';
+import { InvalidInputError } from '../domain/errors';
 import { Logger, consoleLogger } from '../domain/logger';
 import { createPool } from '../repository/postgresql/connection';
 import { JobRepository } from '../repository/postgresql/job.repository';
@@ -141,7 +141,7 @@ export class TaskQueue {
     if (mismatched.length > 0) {
       // Silently ignoring the second call would hand back a handle configured
       // differently from what this call asked for.
-      throw new BadParamInputError(
+      throw new InvalidInputError(
         `Queue "${name}" was already defined with a different configuration ` +
           `(${mismatched.join(', ')}). Define each queue once and share the handle.`
       );

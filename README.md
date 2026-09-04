@@ -700,14 +700,46 @@ accepts its own `logger` override.
 
 ## Errors
 
+Every error this library throws is a `TaskQueueError` carrying a stable `code` and a
+`retryable` flag. **Switch on `code`, not on the class** — `instanceof` silently returns
+false when two copies of this package end up in one dependency tree, and the string never
+does. `isTaskQueueError` is brand-based for the same reason.
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `LEASE_LOST` | You do not hold this job's lease | Abandon the job. Do **not** settle it again. |
+| `JOB_NOT_FOUND` | No live job with that id | Nothing to act on — finished jobs are deleted. |
+| `QUEUE_NOT_FOUND` | No queue with that id | Fix the configuration. |
+| `PUBLISH_CONFLICT` | A publish could neither insert nor read back its key | Under REPEATABLE READ or stricter, retry the whole transaction. |
+| `INVALID_INPUT` | An argument rejected before touching the database | Fix the call — a bad duration, an unserializable payload, a missing group id. |
+
 ```ts
-import {
-  BadParamInputError,   // invalid argument: bad duration, missing group, unserializable payload
-  NotFoundError,        // no such queue or job
-  ConflictError,        // already exists
-  InternalServerError,
-} from 'distributed-task-queue';
+import { ErrorCodes, isTaskQueueError } from 'distributed-task-queue';
+
+try {
+  await queue.publish(payload);
+} catch (error) {
+  if (isTaskQueueError(error) && error.code === ErrorCodes.INVALID_INPUT) {
+    // error.context carries structured detail; prefer it over parsing the message.
+  }
+  throw error;
+}
 ```
+
+`retryable` says whether retrying the **identical call** could plausibly succeed. It does
+not mean the failure was harmless. Every code above is `false`, because each describes a
+state an identical retry cannot change — `LEASE_LOST` most of all: retrying a settle you
+were just fenced out of would be a correctness violation, not a recovery.
+
+### Why a lost lease is not a "not found"
+
+The settle predicate is `id = $1 AND lease_seq = $2 AND status = 'PROCESSING'`. A zero-row
+result collapses several causes the database cannot separate: the lease expired and the
+reaper reclaimed the job, another worker re-leased it, the job was already settled
+(terminal jobs are deleted, leaving no tombstone), or the caller never held a lease at
+all. They share the only fact a caller can act on — **this job is not yours** — so they
+share one code. `JOB_NOT_FOUND` is reserved for a plain `getById` miss, where no lease was
+presented.
 
 Not every failure is translated: driver errors from `pg` (constraint violations,
 connection loss) surface as-is, and a circular or `BigInt` payload raises a raw

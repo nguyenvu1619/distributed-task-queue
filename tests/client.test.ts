@@ -6,7 +6,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { TaskQueue } from '../src/client/task-queue';
-import { BadParamInputError, ConflictError, NotFoundError } from '../src/domain/errors';
+import {
+  ErrorCodes,
+  InvalidInputError,
+  JobNotFoundError,
+  PublishConflictError,
+  QueueNotFoundError,
+  isTaskQueueError,
+} from '../src/domain/errors';
 import { Logger, silentLogger } from '../src/domain/logger';
 import { parseDuration } from '../src/client/duration';
 import { jsonSerializer } from '../src/client/serializer';
@@ -80,7 +87,7 @@ describe('defineQueue', () => {
     const name = h.name('conflict');
     h.tq.defineQueue(name, { concurrency: 4 });
 
-    expect(() => h.tq.defineQueue(name, { concurrency: 8 })).toThrow(BadParamInputError);
+    expect(() => h.tq.defineQueue(name, { concurrency: 8 })).toThrow(InvalidInputError);
     // Restating the same configuration is fine.
     expect(h.tq.defineQueue(name, { concurrency: 4 })).toBe(h.tq.defineQueue(name));
   });
@@ -104,7 +111,7 @@ describe('defineQueue', () => {
 
   it('rejects an unparseable duration', () => {
     expect(() => h.tq.defineQueue(h.name('bad-dur'), { leaseDuration: 'soon' })).toThrow(
-      BadParamInputError
+      InvalidInputError
     );
   });
 
@@ -247,11 +254,11 @@ describe('utilities', () => {
   it('rejects malformed durations', () => {
     for (const bad of ['', 'soon', '10 weeks', '-5s', 'ms']) {
       expect(() => parseDuration(bad), `"${bad}" should be rejected`).toThrow(
-        BadParamInputError
+        InvalidInputError
       );
     }
-    expect(() => parseDuration(-1)).toThrow(BadParamInputError);
-    expect(() => parseDuration(NaN)).toThrow(BadParamInputError);
+    expect(() => parseDuration(-1)).toThrow(InvalidInputError);
+    expect(() => parseDuration(NaN)).toThrow(InvalidInputError);
   });
 
   it('round-trips payloads through the default serializer', () => {
@@ -260,17 +267,28 @@ describe('utilities', () => {
   });
 
   it('refuses a payload JSON cannot represent', () => {
-    expect(() => jsonSerializer.serialize(undefined)).toThrow(BadParamInputError);
+    expect(() => jsonSerializer.serialize(undefined)).toThrow(InvalidInputError);
   });
 
   it('exposes the domain error types', () => {
-    for (const error of [
-      new ConflictError('x'),
-      new NotFoundError('x'),
-      new BadParamInputError('x'),
-    ]) {
+    const errors = [
+      new PublishConflictError('x'),
+      new JobNotFoundError(1),
+      new QueueNotFoundError(1),
+      new InvalidInputError('x'),
+    ];
+
+    for (const error of errors) {
       expect(error).toBeInstanceOf(Error);
       expect(error.name).toBe(error.constructor.name);
+      // The documented contract is the code, not the class: isTaskQueueError is
+      // brand-based so it still narrows across two copies of the package, where
+      // instanceof would quietly return false.
+      expect(isTaskQueueError(error)).toBe(true);
+      expect(Object.values(ErrorCodes)).toContain(error.code);
+      expect(error.retryable).toBe(false);
     }
+
+    expect(isTaskQueueError(new Error('plain'))).toBe(false);
   });
 });

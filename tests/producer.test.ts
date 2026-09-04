@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { TaskQueue } from '../src/client/task-queue';
 import { Serializer } from '../src/client/serializer';
-import { BadParamInputError } from '../src/domain/errors';
+import { InvalidInputError } from '../src/domain/errors';
 import { JobStatus } from '../src/domain/job';
 import { silentLogger } from '../src/domain/logger';
 import { createPool } from '../src/repository/postgresql/connection';
@@ -218,9 +218,9 @@ describe('payload serialization', () => {
     const q = h!.tq.defineQueue<unknown>(h!.name('undef'));
     const queueId = await q.id();
 
-    await expect(q.publish(undefined)).rejects.toThrow(BadParamInputError);
+    await expect(q.publish(undefined)).rejects.toThrow(InvalidInputError);
     // A function also stringifies to `undefined` and must fail the same way.
-    await expect(q.publish(() => 1)).rejects.toThrow(BadParamInputError);
+    await expect(q.publish(() => 1)).rejects.toThrow(InvalidInputError);
 
     expect(await h!.jobCount(queueId)).toBe(0);
   });
@@ -505,8 +505,8 @@ describe('groups', () => {
     const q = h!.tq.defineQueue<{ n: number }>(h!.name('grp-required'), { requiresGroupId: true });
     const queueId = await q.id();
 
-    await expect(q.publish({ n: 1 })).rejects.toThrow(BadParamInputError);
-    await expect(q.publishMany([{ n: 1 }, { n: 2 }])).rejects.toThrow(BadParamInputError);
+    await expect(q.publish({ n: 1 })).rejects.toThrow(InvalidInputError);
+    await expect(q.publishMany([{ n: 1 }, { n: 2 }])).rejects.toThrow(InvalidInputError);
 
     expect(await h!.jobCount(queueId)).toBe(0);
     expect(await readGroupCounters(h!.pool, queueId)).toEqual([]);
@@ -516,7 +516,7 @@ describe('groups', () => {
 /**
  * Inputs the client accepts and the database then refuses. Every case here pins
  * CURRENT behaviour that is arguably a defect — the caller gets a raw driver
- * error rather than a `BadParamInputError` — so that changing any of it is a
+ * error rather than a `InvalidInputError` — so that changing any of it is a
  * deliberate act with a failing test attached.
  */
 describe('inputs that reach the database as raw errors', () => {
@@ -569,7 +569,7 @@ describe('inputs that reach the database as raw errors', () => {
   // KNOWN DEFECTS, all four. `group.concurrency` is passed straight through to
   // an INTEGER column with no validation: two of these quietly produce a job no
   // worker can ever pull, and two blow up with a driver error. Correct behaviour
-  // would be a BadParamInputError for anything but a positive safe integer.
+  // would be a InvalidInputError for anything but a positive safe integer.
   const groupConcurrencyCases: GroupConcurrencyCase[] = [
     {
       // Falsy, so insertJobs skips the limit insert entirely and the job lands
@@ -791,7 +791,7 @@ describe('publishMany', () => {
     const queueId = await q.id();
 
     await expect(q.publishMany([{ n: 1 }, undefined, { n: 3 }])).rejects.toThrow(
-      BadParamInputError
+      InvalidInputError
     );
 
     // Serialization happens before the INSERT is built, so nothing lands.
