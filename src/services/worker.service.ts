@@ -10,6 +10,7 @@ import {
 } from '../domain/worker';
 import { Job } from '../domain/job';
 import { Queue } from '../domain/queue';
+import { ErrorCodes, isTaskQueueError } from '../domain/errors';
 import { Logger, consoleLogger, prefixed } from '../domain/logger';
 
 export {
@@ -224,6 +225,22 @@ export class WorkerService {
         await this.jobService.discardJobDirect(job.id, lockSeq, queue);
       }
     } catch (error) {
+      // A lost lease is a routine fencing outcome, not an incident: the lease expired
+      // and the reaper or another worker owns this job now and will drive it. It fires
+      // once per slow job on any queue with a tight leaseDuration, so error level is
+      // wrong. The onError hook still fires -- it is the only way a consumer can
+      // observe that a zombie's settle was refused rather than silently applied.
+      //
+      // Safe to attribute to THIS job: the try above wraps only the settle calls, all
+      // of which are made with job.id, so a LEASE_LOST raised by the handler settling
+      // some other job cannot reach here.
+      if (isTaskQueueError(error) && error.code === ErrorCodes.LEASE_LOST) {
+        this.logger.debug(
+          `Slot ${slotIndex} lost the lease on job ${job.id} during ${outcome}; abandoning it`,
+        );
+        this.notify({ phase: outcome, error, slot: slotIndex, job });
+        return;
+      }
       this.report({ phase: outcome, error, slot: slotIndex, job });
     }
   }
@@ -231,12 +248,22 @@ export class WorkerService {
   private report(event: WorkerErrorEvent): void {
     const suffix = event.job ? ` (job ${event.job.id})` : '';
     this.logger.error(`Slot ${event.slot} ${event.phase} error${suffix}:`, event.error);
-    if (this.options.onError) {
-      try {
-        this.options.onError(event);
-      } catch (hookError) {
-        this.logger.error('onError hook threw:', hookError);
-      }
+    this.notify(event);
+  }
+
+  /**
+   * Hands an event to the caller's onError hook without logging it as an error.
+   * Split out of report() so a routine outcome can still be observed: onError is
+   * the only signal a consumer has that a settle was fenced off at all.
+   */
+  private notify(event: WorkerErrorEvent): void {
+    if (!this.options.onError) {
+      return;
+    }
+    try {
+      this.options.onError(event);
+    } catch (hookError) {
+      this.logger.error('onError hook threw:', hookError);
     }
   }
 
