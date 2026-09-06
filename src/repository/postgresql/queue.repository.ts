@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { Queue, CreateQueueInput, NUMBER_OF_SHARD } from '../../domain/queue';
-import { NotFoundError } from '../../domain/errors';
+import { QueueNotFoundError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
 
 const QUEUE_COLUMNS = `id, name, max_attempts, lease_duration, concurrency, requires_group_id,
@@ -129,7 +129,7 @@ export class QueueRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Queue with id ${id} not found`);
+      throw new QueueNotFoundError(id);
     }
 
     return this.remember(this.deserializeQueue(result.rows[0] as QueueRow));

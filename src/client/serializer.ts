@@ -1,4 +1,4 @@
-import { BadParamInputError } from '../domain/errors';
+import { InvalidInputError } from '../domain/errors';
 
 /**
  * Turns a payload into the `TEXT` column and back. Swap it per queue to use a
@@ -15,7 +15,7 @@ export const jsonSerializer: Serializer = {
     if (encoded === undefined) {
       // JSON.stringify(undefined) is undefined, and payload is NOT NULL — fail
       // here with something readable rather than at the insert.
-      throw new BadParamInputError('Job payload must be JSON-serializable and not undefined');
+      throw new InvalidInputError('Job payload must be JSON-serializable and not undefined');
     }
     return encoded;
   },

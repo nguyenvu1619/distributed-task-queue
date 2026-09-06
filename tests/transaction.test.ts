@@ -16,7 +16,7 @@ import { Pool, PoolClient } from 'pg';
 
 import { TaskQueue } from '../src/client/task-queue';
 import { QueueHandle } from '../src/client/queue-handle';
-import { ConflictError } from '../src/domain/errors';
+import { ErrorCodes } from '../src/domain/errors';
 import { Executor } from '../src/domain/executor';
 import { silentLogger } from '../src/domain/logger';
 import { createPool } from '../src/repository/postgresql/connection';
@@ -699,7 +699,7 @@ describe('a duplicate idempotency key inside the caller transaction', () => {
 
       // The row `a` inserted is visible to nobody but this transaction. A
       // read-back that moved to the pool would still pass the committed-row
-      // case above and raise ConflictError here, on perfectly ordinary code.
+      // case above and raise PUBLISH_CONFLICT here, on perfectly ordinary code.
       expect(b.deduplicated).toBe(true);
       expect(b.id).toBe(a.id);
 
@@ -712,7 +712,7 @@ describe('a duplicate idempotency key inside the caller transaction', () => {
     expect(await orders!.ids()).toEqual(['after-self-duplicate']);
   });
 
-  it('raises ConflictError when the row the insert skipped is gone before the read-back', async () => {
+  it('raises PUBLISH_CONFLICT when the row the insert skipped is gone before the read-back', async () => {
     const { handle, queueId } = await confirmationQueue();
     const key = 'confirm-vanished';
 
@@ -727,7 +727,7 @@ describe('a duplicate idempotency key inside the caller transaction', () => {
       // read-back of the keys it skipped. Deleting the conflicting row in
       // between — from another session, which is exactly what a worker
       // completing that job does — leaves the read-back with nothing to find.
-      // That window is the only route to ConflictError, the publish path's one
+      // That window is the only route to PUBLISH_CONFLICT, the publish path's one
       // typed error, so without this the branch could quietly become `row!.id`
       // (a bare TypeError) or let the 23505 fly.
       const intercepted: Executor = {
@@ -750,7 +750,7 @@ describe('a duplicate idempotency key inside the caller transaction', () => {
         .then(() => null)
         .catch((err: unknown) => err);
 
-      expect(error).toBeInstanceOf(ConflictError);
+      expect(error).toMatchObject({ code: ErrorCodes.PUBLISH_CONFLICT });
       expect((error as Error).message).toContain(key);
 
       // The typed error's whole purpose: B is untouched and carries on.
@@ -791,7 +791,7 @@ describe('a duplicate idempotency key inside the caller transaction', () => {
       //
       // The fix is either to document the isolation level publishing supports,
       // or to run the insert on a savepoint so a serialization failure can be
-      // caught and turned into the typed ConflictError.
+      // caught and turned into the typed PublishConflictError.
       const publishError = await handle
         .publish({ orderId: 'order-20' }, { tx: b, idempotencyKey: key })
         .then(() => null)
@@ -830,7 +830,7 @@ describe('metadata that Postgres rejects', () => {
       // and the one the README promises publishing cannot cause.
       //
       // The fix is to validate metadata in `QueueHandle.toInput` and throw
-      // BadParamInputError before any statement reaches the connection.
+      // InvalidInputError before any statement reaches the connection.
       const publishError = await handle
         .publish({ orderId: 'order-nul' }, { tx: client, metadata: { note: 'a\u0000b' } })
         .then(() => null)

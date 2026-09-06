@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { JobStatus } from '../src/domain/job';
 import { NUMBER_OF_SHARD, Queue } from '../src/domain/queue';
-import { NotFoundError } from '../src/domain/errors';
+import { ErrorCodes } from '../src/domain/errors';
 import {
   Harness,
   createHarness,
@@ -129,7 +129,7 @@ describe('crash recovery — a worker killed mid-job', () => {
     await expect(
       h.jobRepo.completeJob(published.id, zombie.lockSeq as number, queue),
       'a settle carrying the crashed worker\'s lease_seq was accepted'
-    ).rejects.toBeInstanceOf(NotFoundError);
+    ).rejects.toMatchObject({ code: ErrorCodes.LEASE_LOST });
 
     // The rightful owner can still settle.
     await h.jobRepo.completeJob(retaken!.id, retaken!.lockSeq!, queue);
@@ -182,7 +182,7 @@ describe('lease fencing (deterministic — lease forced to expire)', () => {
 
     await expect(
       h.jobRepo.failJob(published.id, stale!.lockSeq!, queue)
-    ).rejects.toBeInstanceOf(NotFoundError);
+    ).rejects.toMatchObject({ code: ErrorCodes.LEASE_LOST, context: { operation: 'failJob' } });
 
     // The job is still owned by the current lease holder, untouched.
     const row = await readJobRow(h.pool, published.id);
@@ -204,7 +204,10 @@ describe('lease fencing (deterministic — lease forced to expire)', () => {
 
     await expect(
       h.jobRepo.completeJob(published.id, stale!.lockSeq!, queue)
-    ).rejects.toBeInstanceOf(NotFoundError);
+    ).rejects.toMatchObject({
+      code: ErrorCodes.LEASE_LOST,
+      context: { operation: 'completeJob' },
+    });
   });
 });
 

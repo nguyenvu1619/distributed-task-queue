@@ -44,11 +44,16 @@ export { consoleLogger, silentLogger } from './domain/logger';
 export type { Logger } from './domain/logger';
 
 export {
-  InternalServerError,
-  NotFoundError,
-  ConflictError,
-  BadParamInputError,
+  TaskQueueError,
+  ErrorCodes,
+  isTaskQueueError,
+  LeaseLostError,
+  JobNotFoundError,
+  QueueNotFoundError,
+  PublishConflictError,
+  InvalidInputError,
 } from './domain/errors';
+export type { ErrorCode, ErrorContext, TaskQueueOperation } from './domain/errors';
 
 // Connection helpers, for callers who want to build or share their own pool.
 export { createPool } from './repository/postgresql/connection';

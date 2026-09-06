@@ -1,6 +1,6 @@
 import { CreateJobInput, PublishedJob } from '../domain/job';
 import { CreateQueueInput, Queue } from '../domain/queue';
-import { BadParamInputError } from '../domain/errors';
+import { InvalidInputError } from '../domain/errors';
 import { Logger } from '../domain/logger';
 import { StopResult, WorkerOptions } from '../domain/worker';
 import { JobRepository } from '../repository/postgresql/job.repository';
@@ -115,7 +115,7 @@ export class QueueHandle<T = unknown> {
 
   private toInput(queue: Queue, payload: T, options: PublishOptions): CreateJobInput {
     if (queue.requiresGroupId && !options.group) {
-      throw new BadParamInputError(
+      throw new InvalidInputError(
         `Queue "${this.name}" requires a group id, but none was given`
       );
     }
