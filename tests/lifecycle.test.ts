@@ -202,6 +202,32 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     ).rejects.toMatchObject({ code: ErrorCodes.LEASE_LOST });
   });
 
+  // Every settle path resolves the queue with a getById first. That lookup missing must
+  // NOT surface as JOB_NOT_FOUND, or the fencing race would report one code through
+  // JobService and another through the *Direct methods for the very same event.
+  it('reports a lost lease, not a missing job, when settling through JobService', async () => {
+    const queue = await fastQueue();
+    await h.jobRepo.publishJob(jobInput(queue.id));
+    const pulled = await h.jobRepo.pullJob(queue);
+
+    // Settling deletes the row, so every later attempt's pre-flight lookup misses.
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+
+    const seq = Number(pulled!.lockSeq);
+    await expect(h.jobService.completeJob(pulled!.id, seq)).rejects.toMatchObject({
+      code: ErrorCodes.LEASE_LOST,
+      context: { operation: 'completeJob' },
+    });
+    await expect(h.jobService.failJob(pulled!.id, seq)).rejects.toMatchObject({
+      code: ErrorCodes.LEASE_LOST,
+      context: { operation: 'failJob' },
+    });
+    await expect(h.jobService.discardJob(pulled!.id, seq)).rejects.toMatchObject({
+      code: ErrorCodes.LEASE_LOST,
+      context: { operation: 'discardJob' },
+    });
+  });
+
   it('rejects settling a job that was never pulled', async () => {
     const queue = await fastQueue();
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
