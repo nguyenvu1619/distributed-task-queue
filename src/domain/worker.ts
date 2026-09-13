@@ -38,10 +38,28 @@ export interface WorkerErrorEvent {
   job?: Job;
 }
 
+/**
+ * A wake-up source for the poll loop — in practice a Postgres LISTEN
+ * subscription, but the worker only needs the promise.
+ *
+ * `next()` must be captured *before* the pull it guards. Capturing it after an
+ * empty pull leaves a window in which an arrival is announced and lost, and the
+ * slot then waits out a full poll interval on a queue that is not empty.
+ */
+export interface JobWakeup {
+  /** Resolves when the queue may have work. Never rejects. */
+  next(): Promise<void>;
+}
+
 export interface WorkerOptions {
   queueId: number;
   concurrency?: number; // number of concurrent slots, default 1
   pollInterval?: number; // ms to wait when queue is empty, default 1000
+  /**
+   * Cuts the wait on an empty queue short when a job is announced. The poll
+   * interval stays as the floor, so delivery never depends on this.
+   */
+  wakeup?: JobWakeup;
   handler: JobHandler;
   /** Label used in log lines. Defaults to the queue id. */
   name?: string;

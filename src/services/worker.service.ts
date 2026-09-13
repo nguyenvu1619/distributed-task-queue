@@ -2,6 +2,7 @@ import { JobService } from './job.service';
 import {
   HandlerContext,
   JobHandler,
+  JobWakeup,
   StopOptions,
   StopResult,
   WorkerErrorEvent,
@@ -14,6 +15,7 @@ import { Logger, consoleLogger, prefixed } from '../domain/logger';
 export {
   WorkerOptions,
   JobHandler,
+  JobWakeup,
   HandlerContext,
   StopOptions,
   StopResult,
@@ -23,6 +25,7 @@ export {
 export class WorkerService {
   private readonly concurrency: number;
   private readonly pollInterval: number;
+  private readonly wakeup: JobWakeup | undefined;
   private readonly logger: Logger;
   private readonly deserialize: (job: Job) => unknown;
 
@@ -37,6 +40,7 @@ export class WorkerService {
   ) {
     this.concurrency = options.concurrency ?? 1;
     this.pollInterval = options.pollInterval ?? 1000;
+    this.wakeup = options.wakeup;
     this.logger = prefixed(
       options.logger ?? consoleLogger,
       `[worker:${options.name ?? options.queueId}]`,
@@ -141,6 +145,12 @@ export class WorkerService {
     while (this.running) {
       let job: Job | null;
 
+      // Captured before the pull, not after it. A job published while the pull
+      // is in flight resolves this exact promise, so the slot that just saw an
+      // empty queue still wakes immediately instead of sitting out a poll
+      // interval on a queue that has work in it.
+      const announced = this.wakeup?.next();
+
       try {
         job = await this.jobService.pullJobDirect(queue);
       } catch (error) {
@@ -152,7 +162,7 @@ export class WorkerService {
       }
 
       if (!job) {
-        await this.idle();
+        await this.idle(announced);
         continue;
       }
 
@@ -232,9 +242,12 @@ export class WorkerService {
 
   /**
    * The wait after an empty poll. Ends at whichever comes first: the poll
-   * interval or stop().
+   * interval, a job announced on `announced`, or stop().
+   *
+   * The timer is always cleared, including when a notification wins the race —
+   * a busy queue would otherwise leave one live timer per empty poll behind.
    */
-  private idle(): Promise<void> {
+  private idle(announced?: Promise<void>): Promise<void> {
     const signal = this.abort.signal;
     if (signal.aborted) {
       return Promise.resolve();
@@ -253,6 +266,7 @@ export class WorkerService {
       };
       const timer = setTimeout(done, this.pollInterval);
       signal.addEventListener('abort', done, { once: true });
+      announced?.then(done, done);
     });
   }
 }
