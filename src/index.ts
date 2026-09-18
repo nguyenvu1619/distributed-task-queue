@@ -13,6 +13,7 @@ export * from './domain/job';
 export * from './domain/queue';
 export * from './domain/errors';
 export * from './domain/worker';
+export * from './domain/executor';
 
 // Re-export Pool from pg for convenience
 export { Pool } from 'pg';

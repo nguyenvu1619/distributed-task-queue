@@ -2,6 +2,7 @@ import { JobRepository } from '../repository/postgresql/job.repository';
 import { QueueRepository } from '../repository/postgresql/queue.repository';
 import { Job, JobStatus, CreateJobInput } from '../domain/job';
 import { Queue } from '../domain/queue';
+import { Executor } from '../domain/executor';
 
 export class JobService {
   constructor(
@@ -13,8 +14,13 @@ export class JobService {
     return this.jobRepo.getById(id);
   }
 
-  async publishJob(input: CreateJobInput): Promise<Job> {
-    return this.jobRepo.publishJob(input);
+  /**
+   * Publishes a job. Pass `executor` (a `PoolClient` inside BEGIN/COMMIT, or any
+   * handle exposing `query(text, values)`) to have the job commit atomically with
+   * the caller's own writes — see `JobRepository.publishJob` for what that costs.
+   */
+  async publishJob(input: CreateJobInput, executor?: Executor): Promise<Job> {
+    return this.jobRepo.publishJob(input, executor);
   }
 
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {

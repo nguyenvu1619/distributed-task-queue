@@ -3,6 +3,7 @@ import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
 import { Queue } from '../../domain/queue';
 import { NotFoundError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
+import { Executor } from '../../domain/executor';
 
 // Every read of an active job returns the same projection.
 const JOB_COLUMNS = `id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
@@ -54,8 +55,24 @@ export class JobRepository {
    * statement, which keeps the pair atomic without a transaction: a job whose
    * limit row never landed would fail the group gate on every pull and jam the
    * queue head for ever.
+   *
+   * Pass `executor` — a `PoolClient` mid-transaction, or any handle that can run
+   * `query(text, values)` — to enrol the publish in the caller's transaction, so
+   * the job commits with the business writes that justify it or not at all. That
+   * is what lets a caller skip an outbox table: this row *is* the outbox row, and
+   * the worker is what polls it. It only holds while the queue lives in the same
+   * database as those writes; across databases an outbox (or 2PC) is still the
+   * only atomic story.
+   *
+   * Two consequences the caller owns, both inherent to their transaction rather
+   * than to this call: the job stays invisible to every worker until they COMMIT,
+   * and a group-seeding publish holds the `group_queue_limits` row lock for the
+   * rest of that transaction, which stalls concurrent publishers into the same
+   * group. Keep the transaction short.
+   *
+   * Omitted, it runs on the pool and commits on its own, as it always has.
    */
-  async publishJob(input: CreateJobInput): Promise<Job> {
+  async publishJob(input: CreateJobInput, executor: Executor = this.pool): Promise<Job> {
     const metadata = input.metadata || {};
     const attempts = input.attempts || 0;
 
@@ -80,7 +97,7 @@ export class JobRepository {
       values.push(input.group.id, input.queueId, input.group.concurrency);
     }
 
-    const result = await this.pool.query(
+    const result = await executor.query(
       `WITH ins AS (
          INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
          VALUES ($1, $2, $3, $4, $5, $6, $7)

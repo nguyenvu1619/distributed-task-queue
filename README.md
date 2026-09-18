@@ -95,6 +95,66 @@ const job = await jobService.publishJob({
 });
 ```
 
+#### Transactional Publish (no outbox table)
+
+`publishJob` takes an optional second argument: any handle that can run
+`query(text, values)`. Pass the client you are already holding open and the job
+row commits with the writes that justify it, or not at all — which is what an
+outbox table exists to buy you. The job row *is* the outbox row here, and the
+worker is what polls it.
+
+```typescript
+const client = await pool.connect();
+try {
+  await client.query('BEGIN');
+
+  await client.query('INSERT INTO orders (id, total) VALUES ($1, $2)', [orderId, total]);
+
+  await jobService.publishJob(
+    {
+      idempotencyKey: `order-confirmation-${orderId}`,
+      payload: JSON.stringify({ orderId }),
+      queueId: queue.id,
+    },
+    client // <- same transaction as the INSERT above
+  );
+
+  await client.query('COMMIT'); // order and job land together
+} catch (err) {
+  await client.query('ROLLBACK'); // neither lands; no job for an order that does not exist
+  throw err;
+} finally {
+  client.release();
+}
+```
+
+Omit the argument and the publish runs on the pool and commits on its own, as
+before.
+
+Three things to know:
+
+- **Same database only.** This works because the job row and the business rows
+  share one transaction. If the queue lives in a different database or cluster,
+  you still need an outbox (or two-phase commit) — nothing here makes that case
+  atomic.
+- **The job is invisible until you commit.** No worker can pull it before then,
+  which is the intended behaviour but worth stating: publish latency becomes
+  your transaction's latency.
+- **Keep the transaction short.** A publish that seeds a group limit holds the
+  `group_queue_limits` row lock until you commit, which stalls other publishers
+  into the same group.
+
+The parameter is typed structurally (`Executor`), not as a pg `PoolClient`, so a
+Knex / Kysely / Drizzle transaction handle works through a small adapter:
+
+```typescript
+import type { Executor } from 'distributed-task-queue';
+
+const asExecutor = (trx: Knex.Transaction): Executor => ({
+  query: (text, values) => trx.raw(text, values ?? []),
+});
+```
+
 #### Worker Example
 
 ```typescript
@@ -188,8 +248,11 @@ reaper.start();
 
 ### JobService
 
-#### `publishJob(input: CreateJobInput): Promise<Job>`
-Publishes a new job to the queue.
+#### `publishJob(input: CreateJobInput, executor?: Executor): Promise<Job>`
+Publishes a new job to the queue. Pass `executor` — an open `PoolClient`, or any
+handle exposing `query(text, values)` — to enrol the insert in your own
+transaction so the job commits with your business writes. See
+[Transactional Publish](#transactional-publish-no-outbox-table).
 
 #### `pullJob(queueId: number): Promise<Job | null>`
 Pulls and locks a job from the specified queue. Returns `null` if no jobs are available.
