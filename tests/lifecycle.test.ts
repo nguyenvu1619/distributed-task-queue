@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JobStatus } from '../src/domain/job';
 import { CreateQueueInput, NUMBER_OF_SHARD } from '../src/domain/queue';
 import { NotFoundError } from '../src/domain/errors';
+import { Logger, silentLogger } from '../src/domain/logger';
+import { QueueRepository } from '../src/repository/postgresql/queue.repository';
 import {
   Harness,
   createHarness,
@@ -14,6 +16,11 @@ import {
 import { readGroupCounters, readJobRow, readShardCounters } from './support/invariants';
 
 let h: Harness;
+
+/** A logger that swallows everything but collects `warn` lines for assertions. */
+function captureWarnings(sink: string[]): Logger {
+  return { ...silentLogger, warn: (message: string) => void sink.push(message) };
+}
 
 // A fresh harness per test: QueueRepository memoises queues in-process, so a
 // reused instance would keep serving rows that TRUNCATE has already removed.
@@ -61,6 +68,61 @@ describe('queue lifecycle', () => {
     // The advertised cap must equal what the shards can actually admit.
     const admissible = shards.reduce((sum, s) => sum + s.maxRunning, 0);
     expect(admissible).toBe(concurrency);
+  });
+
+  it('returns the queue that already owns the name instead of failing on the unique index', async () => {
+    const warnings: string[] = [];
+    const repo = new QueueRepository(h.pool, captureWarnings(warnings));
+    const name = uniqueName('dup');
+
+    const first = await repo.createQueue(
+      queueInput({ name, maxAttempts: 3, concurrency: NUMBER_OF_SHARD })
+    );
+    // Deliberately different config: the existing queue wins, it is not patched.
+    const second = await repo.createQueue(
+      queueInput({ name, maxAttempts: 9, concurrency: NUMBER_OF_SHARD * 4 })
+    );
+
+    expect(second.id, 'a duplicate name produced a second queue').toBe(first.id);
+    expect(second.maxAttempts).toBe(3);
+    expect(second.concurrency).toBe(NUMBER_OF_SHARD);
+    expect(
+      warnings.some((w) => w.includes(name)),
+      'the losing create returned silently instead of warning'
+    ).toBe(true);
+
+    // The loser must not have topped up the winner's shards on its way out.
+    const shards = await readShardCounters(h.pool, first.id);
+    expect(shards).toHaveLength(NUMBER_OF_SHARD);
+    expect(shards.reduce((sum, s) => sum + s.maxRunning, 0)).toBe(NUMBER_OF_SHARD);
+  });
+
+  it('collapses a concurrent race on one name onto a single queue and one set of shards', async () => {
+    const RACERS = 8;
+    const concurrency = NUMBER_OF_SHARD * 2;
+    const warnings: string[] = [];
+    const repo = new QueueRepository(h.pool, captureWarnings(warnings));
+    const name = uniqueName('race');
+
+    const created = await Promise.all(
+      Array.from({ length: RACERS }, () => repo.createQueue(queueInput({ name, concurrency })))
+    );
+
+    expect(new Set(created.map((q) => q.id)).size, 'the racers disagreed on which queue is theirs')
+      .toBe(1);
+    expect(warnings, 'every loser but none of the winners must warn').toHaveLength(RACERS - 1);
+
+    const { rows } = await h.pool.query(
+      'SELECT count(*)::int AS n FROM queues WHERE name = $1',
+      [name]
+    );
+    expect(rows[0].n).toBe(1);
+
+    // The decisive one: shard rows are the queue's capacity, so a loser writing
+    // its own set would silently multiply the cap by the number of racers.
+    const shards = await readShardCounters(h.pool, created[0].id);
+    expect(shards).toHaveLength(NUMBER_OF_SHARD);
+    expect(shards.reduce((sum, s) => sum + s.maxRunning, 0)).toBe(concurrency);
   });
 
   it('rejects a lookup for an unknown queue', async () => {
@@ -318,6 +380,43 @@ describe('job lifecycle — coordination path (concurrency > 0 / groups)', () =>
 
     const released = await readShardCounters(h.pool, queue.id);
     expect(released.reduce((sum, s) => sum + s.running, 0)).toBe(0);
+  });
+
+  it('gives a queue below NUMBER_OF_SHARD its full capacity, one slot per shard', async () => {
+    // Floor division would hand every shard max_running = 0 here and the queue
+    // would admit nothing. Shards that carry no slot are not written at all, so
+    // the row count is the capacity and the pull gate never scans a dead row.
+    const concurrency = 5;
+    expect(concurrency, 'this test only means anything below the shard count').toBeLessThan(
+      NUMBER_OF_SHARD
+    );
+    const queue = await h.queueService.createQueue(queueInput({ concurrency }));
+
+    const shards = await readShardCounters(h.pool, queue.id);
+    expect(shards).toHaveLength(concurrency);
+    expect(shards.every((s) => s.maxRunning === 1)).toBe(true);
+    expect(shards.reduce((sum, s) => sum + s.maxRunning, 0)).toBe(concurrency);
+
+    for (let i = 0; i < concurrency + 1; i++) {
+      await h.jobRepo.publishJob(jobInput(queue.id));
+    }
+
+    const pulled = [];
+    for (let i = 0; i < concurrency; i++) {
+      const job = await h.jobRepo.pullJob(queue);
+      expect(job, `slot ${i} was refused even though the queue still had capacity`).not.toBeNull();
+      pulled.push(job!);
+    }
+    expect(
+      await h.jobRepo.pullJob(queue),
+      'the queue admitted more jobs than its configured concurrency'
+    ).toBeNull();
+
+    await h.jobRepo.completeJob(pulled[0].id, pulled[0].lockSeq!, queue);
+    expect(
+      await h.jobRepo.pullJob(queue),
+      'a released slot was not handed back out'
+    ).not.toBeNull();
   });
 
   it('reports the lease it just issued back to the caller', async () => {

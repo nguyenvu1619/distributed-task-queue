@@ -11,6 +11,7 @@ import {
 import {
   ConcurrencyTracker,
   KeyedConcurrencyTracker,
+  KeyedProcessingSampler,
   ProcessingSampler,
   countByStatus,
   expectNoNegativeCounters,
@@ -105,22 +106,26 @@ describe('queue concurrency cap', () => {
     expect(result.pullErrors).toEqual([]);
     expect(sampler.samples, 'sampler produced no observations').toBeGreaterThan(10);
 
-    // Two independent witnesses of the same invariant.
-    expect(
-      tracker.peak,
-      `client-observed peak in-flight jobs exceeded the cap of ${concurrency}`
-    ).toBeLessThanOrEqual(concurrency);
-
-    // ...and the cap has to actually bind. Without a lower bound this test would
-    // still pass if a regression let the queue admit one job at a time.
-    expect(
-      tracker.peak,
-      `the queue never came close to its cap of ${concurrency} — the cap assertion above proves nothing`
-    ).toBeGreaterThan(concurrency / 2);
+    // The cap itself is witnessed twice, and neither witness is the client
+    // tracker — a worker keeps counting a job for one settle round trip after
+    // the database freed its slot, so tracker.peak sits above the cap without
+    // the cap ever being broken.
+    //
+    // Witness 1, exact: queue_shards carries CHECK (running <= max_running), so
+    // an over-admit fails the pull statement and lands in pullErrors above.
+    // Witness 2, sampled: PROCESSING rows counted straight from the database.
     expect(
       sampler.peak,
       `database-observed PROCESSING rows exceeded the cap of ${concurrency}`
     ).toBeLessThanOrEqual(concurrency);
+
+    // The cap also has to actually bind, or the assertions above prove nothing.
+    // This is what the client tracker is good for: it cannot miss a window, and
+    // over-counting only makes a lower bound easier to satisfy honestly.
+    expect(
+      tracker.peak,
+      `the queue never came close to its cap of ${concurrency} — the cap assertions above prove nothing`
+    ).toBeGreaterThan(concurrency / 2);
   });
 
   it('returns every shard counter to zero once the queue drains', async () => {
@@ -190,6 +195,9 @@ describe('group concurrency cap', () => {
     await publishJobs(h, queue, total, { groupIds: GROUPS, groupConcurrency: GROUP_CAP });
 
     const groupTracker = new KeyedConcurrencyTracker();
+    const sampler = new KeyedProcessingSampler(obs.pool, queue.id, 5);
+    sampler.start();
+
     const result = await runRace(h, queue, {
       workers: 40,
       holdMs: 15,
@@ -201,13 +209,31 @@ describe('group concurrency cap', () => {
       groupTracker,
     });
 
+    sampler.stop();
+
+    // Also the exact cap witness: group_queue_limits carries
+    // CHECK (running <= max_running), so an over-admit fails the pull statement
+    // rather than passing unnoticed, and shows up right here.
     expect(result.pullErrors).toEqual([]);
     expect(duplicates(result.pulledIds)).toEqual([]);
+    expect(sampler.samples, 'sampler produced no observations').toBeGreaterThan(10);
 
-    for (const [groupId, peak] of groupTracker.peaks) {
-      expect(peak, `group ${groupId} exceeded its cap of ${GROUP_CAP}`).toBeLessThanOrEqual(
-        GROUP_CAP
-      );
+    // Sampled witness. Deliberately not groupTracker: a worker counts a job for
+    // one settle round trip after the database released its group slot, so the
+    // client-side peak runs above the cap while the cap holds.
+    for (const groupId of GROUPS) {
+      expect(
+        sampler.peaks.get(groupId) ?? 0,
+        `group ${groupId} exceeded its cap of ${GROUP_CAP}`
+      ).toBeLessThanOrEqual(GROUP_CAP);
+    }
+
+    // And the caps have to bind, or none of the above proves anything.
+    for (const groupId of GROUPS) {
+      expect(
+        groupTracker.peaks.get(groupId) ?? 0,
+        `group ${groupId} never reached its cap of ${GROUP_CAP}`
+      ).toBeGreaterThanOrEqual(GROUP_CAP);
     }
 
     expect(result.pulledIds).toHaveLength(total);

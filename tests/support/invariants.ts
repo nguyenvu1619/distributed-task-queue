@@ -139,9 +139,64 @@ export class ProcessingSampler {
 }
 
 /**
- * Client-side high-water mark of concurrently-held jobs. Complements
- * ProcessingSampler: this one cannot miss a window, but it only sees the
- * jobs held by workers in *this* process.
+ * Per-group version of ProcessingSampler: one grouped count per tick, so every
+ * group shares a single consistent observation.
+ */
+export class KeyedProcessingSampler {
+  readonly peaks = new Map<string, number>();
+  samples = 0;
+  private timer: NodeJS.Timeout | null = null;
+  private inFlight = false;
+
+  constructor(
+    private pool: Pool,
+    private queueId: number,
+    private intervalMs = 10
+  ) {}
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      if (this.inFlight) return;
+      this.inFlight = true;
+      this.pool
+        .query(
+          `SELECT group_id, count(*)::int AS n FROM jobs
+           WHERE queue_id = $1 AND status = $2 AND group_id IS NOT NULL
+           GROUP BY group_id`,
+          [this.queueId, JobStatus.PROCESSING]
+        )
+        .then(({ rows }) => {
+          this.samples += 1;
+          for (const r of rows) {
+            if (r.n > (this.peaks.get(r.group_id) ?? 0)) this.peaks.set(r.group_id, r.n);
+          }
+        })
+        .catch(() => {
+          /* pool saturated mid-race — drop the sample rather than fail the run */
+        })
+        .finally(() => {
+          this.inFlight = false;
+        });
+    }, this.intervalMs);
+    this.timer.unref?.();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+}
+
+/**
+ * Client-side high-water mark of concurrently-held jobs.
+ *
+ * NOT a witness for a cap. A worker calls exit() only once its settle round trip
+ * has returned, while the database released the slot when that statement
+ * committed — 5-36ms earlier under load. Another worker can be admitted inside
+ * that gap entirely legitimately, so this peak runs above the real cap. Use it
+ * as a *lower* bound (proof the race actually pushed the queue to its limit) and
+ * leave the upper bound to the samplers and to the schema's cap constraints.
  */
 export class ConcurrencyTracker {
   current = 0;
