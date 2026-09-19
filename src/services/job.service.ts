@@ -23,6 +23,14 @@ export class JobService {
     return this.jobRepo.publishJob(input, executor);
   }
 
+  /**
+   * Publishes many jobs in one statement — one round trip, all-or-nothing.
+   * Takes the same optional `executor` as `publishJob`.
+   */
+  async publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<Job[]> {
+    return this.jobRepo.publishJobs(inputs, executor);
+  }
+
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {
     return this.jobRepo.pullJobs(status, limit);
   }

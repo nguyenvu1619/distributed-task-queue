@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
 import { Queue } from '../../domain/queue';
-import { NotFoundError } from '../../domain/errors';
+import { ConflictError, InternalServerError, NotFoundError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
 import { Executor } from '../../domain/executor';
 
@@ -108,6 +108,149 @@ export class JobRepository {
     );
 
     return this.deserializeJob(result.rows[0] as JobRow);
+  }
+
+  /**
+   * Publishes many jobs as one statement, and therefore as one transaction:
+   * every job lands or none does, with a single round trip regardless of batch
+   * size. `executor` behaves exactly as in {@link publishJob} — pass an open
+   * transaction handle to commit the whole batch with the caller's own writes.
+   *
+   * The rows travel as seven parallel arrays through `unnest` rather than as a
+   * generated `VALUES` list. That keeps the parameter count at ten no matter how
+   * many jobs are in the batch, so nothing has to be chunked to stay under
+   * PostgreSQL's 65535-parameter ceiling — and chunking is what would quietly
+   * cost the all-or-nothing guarantee, since separate statements on a pool are
+   * separate transactions.
+   *
+   * No cap is enforced on batch size: with no parameter ceiling to hit, nothing
+   * here forces one. Keep batches in the low thousands anyway — what grows is the
+   * transaction (lock duration, WAL, how long one connection is held), not the
+   * round-trip count. Callers needing far more should chunk themselves and pick
+   * their own atomicity, rather than have this method quietly split one
+   * all-or-nothing batch into several that are not.
+   *
+   * Two things the caller should know:
+   * - Every job in a batch is stamped with the same `created_at`: `now()` is the
+   *   transaction's start time, not the row's. Pulls order by `created_at`, so
+   *   jobs within one batch come out in no particular order relative to each
+   *   other. Order across batches is unaffected.
+   * - Duplicate idempotency keys are rejected, not deduplicated. A repeat inside
+   *   the batch is caught here; a key already in the table still raises the
+   *   unique violation from PostgreSQL, exactly as a single publish does.
+   */
+  async publishJobs(inputs: CreateJobInput[], executor: Executor = this.pool): Promise<Job[]> {
+    if (inputs.length === 0) {
+      return [];
+    }
+
+    const idempotencyKeys: string[] = [];
+    const payloads: string[] = [];
+    const statuses: string[] = [];
+    const groupIds: (string | null)[] = [];
+    const queueIds: number[] = [];
+    const attempts: number[] = [];
+    const metadatas: string[] = [];
+
+    // Keyed on queue + group: the same group name under two queues is two
+    // independent caps, and `group_queue_limits` is keyed that way too.
+    const groupLimits = new Map<string, { groupId: string; queueId: number; concurrency: number }>();
+
+    const seenKeys = new Set<string>();
+    for (const input of inputs) {
+      // PostgreSQL would reject this as a unique violation anyway, but only
+      // after the round trip and without naming which key collided.
+      if (seenKeys.has(input.idempotencyKey)) {
+        throw new ConflictError(
+          `Duplicate idempotencyKey "${input.idempotencyKey}" within the same batch`
+        );
+      }
+      seenKeys.add(input.idempotencyKey);
+
+      idempotencyKeys.push(input.idempotencyKey);
+      payloads.push(input.payload);
+      statuses.push(JobStatus.PENDING);
+      groupIds.push(input.group?.id || null);
+      queueIds.push(input.queueId);
+      attempts.push(input.attempts || 0);
+      metadatas.push(JSON.stringify(input.metadata || {}));
+
+      if (input.group?.id && input.group?.concurrency) {
+        const key = `${input.queueId}\u0000${input.group.id}`;
+        // First declaration wins. A later, differing concurrency for the same
+        // group would be dropped by ON CONFLICT DO NOTHING regardless — the cap
+        // belongs to whoever seeded the row first, batch or not.
+        if (!groupLimits.has(key)) {
+          groupLimits.set(key, {
+            groupId: input.group.id,
+            queueId: input.queueId,
+            concurrency: input.group.concurrency,
+          });
+        }
+      }
+    }
+
+    const values: any[] = [
+      idempotencyKeys,
+      payloads,
+      statuses,
+      groupIds,
+      queueIds,
+      attempts,
+      metadatas,
+    ];
+
+    let limitsCte = '';
+    if (groupLimits.size > 0) {
+      // Sorted so every process seeds overlapping groups in the same order.
+      // Two batches touching the same pair of groups in opposite orders would
+      // otherwise be able to deadlock against each other on the row locks.
+      const limits = [...groupLimits.values()].sort(
+        (a, b) => a.queueId - b.queueId || (a.groupId < b.groupId ? -1 : a.groupId > b.groupId ? 1 : 0)
+      );
+
+      limitsCte = `,
+       limits AS (
+         INSERT INTO group_queue_limits (group_id, queue_id, max_running, running, updated_at, created_at)
+         SELECT g, q, m, 0, now(), now()
+         FROM unnest($8::text[], $9::bigint[], $10::int[]) AS t(g, q, m)
+         ON CONFLICT DO NOTHING
+       )`;
+      values.push(
+        limits.map((l) => l.groupId),
+        limits.map((l) => l.queueId),
+        limits.map((l) => l.concurrency)
+      );
+    }
+
+    const result = await executor.query(
+      `WITH ins AS (
+         INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
+         SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::bigint[],
+                              $6::int[], $7::jsonb[])
+         RETURNING ${JOB_COLUMNS}
+       )${limitsCte}
+       SELECT * FROM ins`,
+      values
+    );
+
+    // RETURNING makes no promise about row order, so the batch is realigned on
+    // the one column guaranteed unique across it rather than on position.
+    const byKey = new Map<string, Job>();
+    for (const row of result.rows) {
+      const job = this.deserializeJob(row as JobRow);
+      byKey.set(job.idempotencyKey, job);
+    }
+
+    return inputs.map((input) => {
+      const job = byKey.get(input.idempotencyKey);
+      if (!job) {
+        throw new InternalServerError(
+          `Batch publish did not return the job for idempotencyKey "${input.idempotencyKey}"`
+        );
+      }
+      return job;
+    });
   }
 
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {
