@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
-import { Job, JobStatus, CreateJobInput, Metadata } from '../../domain/job';
+import { Job, JobStatus, CreateJobInput, Metadata, PublishedJob } from '../../domain/job';
 import { Queue } from '../../domain/queue';
-import { ConflictError, InternalServerError, NotFoundError } from '../../domain/errors';
+import { ConflictError, NotFoundError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
 import { Executor } from '../../domain/executor';
 
@@ -13,21 +13,58 @@ const JOB_COLUMNS = `id, idempotency_key, payload, status, group_id, queue_id, q
 // Database row interface for the active jobs table (snake_case)
 // Note: completed_at is not stored — completed/failed jobs are deleted
 interface JobRow {
-  id: number;
+  // The BIGINT columns are typed as `number | string`: they arrive as strings
+  // from any `pg` copy without this package's INT8 parser. See `toNumber`.
+  id: number | string;
   idempotency_key: string;
   payload: string;
   status: string;
   group_id: string | null;
-  queue_id: number;
+  queue_id: number | string;
   attempts: number;
   metadata: any;
-  queue_shard_no: number | null;
+  queue_shard_no: number | string | null;
   created_at: Date;
   updated_at: Date;
-  lease_seq: number | null;
+  lease_seq: number | string | null;
   lease_expires_at: Date | null;
 }
 
+
+/**
+ * Coerces a BIGINT column to a JavaScript number.
+ *
+ * `connection.ts` registers an INT8 parser, but only on *this* package's copy
+ * of `pg`. A publish handed an `Executor` runs on the caller's client, which
+ * may come from a different copy with no parser registered — there those
+ * columns arrive as strings, and `lease_seq + 1` in the fencing path becomes
+ * string concatenation rather than arithmetic. Every id, queue id, shard number
+ * and lease sequence therefore passes through here regardless of who ran the
+ * statement.
+ *
+ * Every 64-bit column in this schema stays far below 2^53, so the conversion
+ * is lossless.
+ */
+/**
+ * Identity of a job for dedup purposes, matching the unique index from
+ * migration 000004. NUL separates the parts so no queue id / key pair can
+ * collide with another by concatenation.
+ */
+function jobKey(queueId: number, idempotencyKey: string): string {
+  return `${queueId}\u0000${idempotencyKey}`;
+}
+
+/** Same construction for the `(queue_id, group_id)` primary key. */
+function groupKey(queueId: number, groupId: string): string {
+  return `${queueId}\u0000${groupId}`;
+}
+
+function toNumber(value: number | string | null): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return typeof value === 'number' ? value : Number(value);
+}
 
 export class JobRepository {
   constructor(
@@ -51,98 +88,111 @@ export class JobRepository {
   }
 
   /**
-   * Publishes one job. The insert and its group-limit seeding travel as one
-   * statement, which keeps the pair atomic without a transaction: a job whose
-   * limit row never landed would fail the group gate on every pull and jam the
-   * queue head for ever.
-   *
-   * Pass `executor` — a `PoolClient` mid-transaction, or any handle that can run
-   * `query(text, values)` — to enrol the publish in the caller's transaction, so
-   * the job commits with the business writes that justify it or not at all. That
-   * is what lets a caller skip an outbox table: this row *is* the outbox row, and
-   * the worker is what polls it. It only holds while the queue lives in the same
-   * database as those writes; across databases an outbox (or 2PC) is still the
-   * only atomic story.
-   *
-   * Two consequences the caller owns, both inherent to their transaction rather
-   * than to this call: the job stays invisible to every worker until they COMMIT,
-   * and a group-seeding publish holds the `group_queue_limits` row lock for the
-   * rest of that transaction, which stalls concurrent publishers into the same
-   * group. Keep the transaction short.
-   *
-   * Omitted, it runs on the pool and commits on its own, as it always has.
+   * Publishes one job. See {@link publishJobs} — this is that path with a batch
+   * of one, so the transactional and deduplication semantics are identical by
+   * construction rather than by two implementations agreeing.
    */
-  async publishJob(input: CreateJobInput, executor: Executor = this.pool): Promise<Job> {
-    const metadata = input.metadata || {};
-    const attempts = input.attempts || 0;
-
-    const values: any[] = [
-      input.idempotencyKey,
-      input.payload,
-      JobStatus.PENDING,
-      input.group?.id || null,
-      input.queueId,
-      attempts,
-      JSON.stringify(metadata),
-    ];
-
-    let limitsCte = '';
-    if (input.group?.id && input.group?.concurrency) {
-      limitsCte = `,
-       limits AS (
-         INSERT INTO group_queue_limits (group_id, queue_id, max_running, running, updated_at, created_at)
-         VALUES ($8, $9, $10, 0, now(), now())
-         ON CONFLICT DO NOTHING
-       )`;
-      values.push(input.group.id, input.queueId, input.group.concurrency);
-    }
-
-    const result = await executor.query(
-      `WITH ins AS (
-         INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING ${JOB_COLUMNS}
-       )${limitsCte}
-       SELECT * FROM ins`,
-      values
-    );
-
-    return this.deserializeJob(result.rows[0] as JobRow);
+  async publishJob(input: CreateJobInput, executor: Executor = this.pool): Promise<PublishedJob> {
+    const [job] = await this.publishJobs([input], executor);
+    return job;
   }
 
   /**
-   * Publishes many jobs as one statement, and therefore as one transaction:
-   * every job lands or none does, with a single round trip regardless of batch
-   * size. `executor` behaves exactly as in {@link publishJob} — pass an open
-   * transaction handle to commit the whole batch with the caller's own writes.
+   * Publishes jobs, deduplicating on `(queueId, idempotencyKey)`.
    *
-   * The rows travel as seven parallel arrays through `unnest` rather than as a
-   * generated `VALUES` list. That keeps the parameter count at ten no matter how
-   * many jobs are in the batch, so nothing has to be chunked to stay under
-   * PostgreSQL's 65535-parameter ceiling — and chunking is what would quietly
-   * cost the all-or-nothing guarantee, since separate statements on a pool are
-   * separate transactions.
+   * ## Transactions
    *
-   * No cap is enforced on batch size: with no parameter ceiling to hit, nothing
-   * here forces one. Keep batches in the low thousands anyway — what grows is the
-   * transaction (lock duration, WAL, how long one connection is held), not the
-   * round-trip count. Callers needing far more should chunk themselves and pick
-   * their own atomicity, rather than have this method quietly split one
-   * all-or-nothing batch into several that are not.
+   * `executor` — a `PoolClient` mid-transaction, or any handle that can run
+   * `query(text, values)` — enrols the publish in the caller's transaction, so
+   * the jobs commit with the business writes that justify them or not at all.
+   * That is what lets a caller skip an outbox table: these rows *are* the outbox
+   * rows, and the worker is what polls them. It only holds while the queue lives
+   * in the same database as those writes; across databases an outbox (or 2PC) is
+   * still the only atomic story. Omitted, the publish runs on the pool and
+   * commits on its own. Either way this method never opens, commits or rolls
+   * back a transaction of its own.
    *
-   * Two things the caller should know:
-   * - Every job in a batch is stamped with the same `created_at`: `now()` is the
-   *   transaction's start time, not the row's. Pulls order by `created_at`, so
-   *   jobs within one batch come out in no particular order relative to each
-   *   other. Order across batches is unaffected.
-   * - Duplicate idempotency keys are rejected, not deduplicated. A repeat inside
-   *   the batch is caught here; a key already in the table still raises the
-   *   unique violation from PostgreSQL, exactly as a single publish does.
+   * ## Deduplication
+   *
+   * A key already held by a live job is not an error: that job comes back with
+   * `deduplicated: true`, so exactly one row — and therefore exactly one
+   * delivery — exists for it. Raising instead would be unusable inside a
+   * caller's transaction, where an unhandled constraint violation aborts the
+   * whole transaction and takes their business writes down with the publish.
+   *
+   * Insert and conflict are resolved by one statement, so there is no window in
+   * which the job holding a key can settle and disappear before the publish
+   * learns its identity. A duplicate does write the row it resolves to — that
+   * is what makes the row come back — but it writes only `revision`, leaving
+   * `status`, `attempts` and the lease columns alone, so a job a worker is
+   * holding is unaffected by it.
+   *
+   * The cost is a row lock on that job, held until the caller commits:
+   * `pullJob` and the reaper both use SKIP LOCKED and step around it, but that
+   * one job's `completeJob`/`failJob` waits. One more reason to keep the
+   * transaction short.
+   *
+   * Uniqueness is per queue, so the same business id can back a job on the email
+   * queue and another on the invoicing queue. It covers only *live* jobs:
+   * settled jobs are deleted, which frees the key.
+   *
+   * Within a single batch, the **first occurrence of a key wins** — it reports
+   * `deduplicated: false` and every later occurrence reports `true` against the
+   * same row. Repeats are collapsed before the statement runs, since ON CONFLICT
+   * DO UPDATE refuses to touch one row twice in a single command.
+   *
+   * ## Shape
+   *
+   * The insert travels as one statement, so the whole batch lands or none of it
+   * does, in a single round trip. The rows go as parallel arrays through
+   * `unnest` rather than a generated `VALUES` list, which keeps the parameter
+   * count fixed no matter how many jobs are in the batch — nothing has to be
+   * chunked to stay under PostgreSQL's 65535-parameter ceiling, and chunking is
+   * what would quietly cost the all-or-nothing guarantee.
+   *
+   * No cap is enforced on batch size. Keep batches in the low thousands anyway —
+   * what grows is the transaction (lock duration, WAL, how long one connection
+   * is held), not the round-trip count.
+   *
+   * Every job in a batch is stamped with the same `created_at`: `now()` is the
+   * transaction's start time, not the row's. Pulls order by `created_at`, so
+   * jobs within one batch come out in no particular order relative to each
+   * other. Order across batches is unaffected.
+   *
+   * @throws ConflictError if the statement returns no row for an input. There is
+   * no known way to reach this — DO UPDATE returns on both the insert and the
+   * conflict path — so it guards an invariant rather than a race.
    */
-  async publishJobs(inputs: CreateJobInput[], executor: Executor = this.pool): Promise<Job[]> {
+  async publishJobs(
+    inputs: CreateJobInput[],
+    executor: Executor = this.pool
+  ): Promise<PublishedJob[]> {
     if (inputs.length === 0) {
       return [];
     }
+
+    // Collapse repeats before the statement, for two reasons. ON CONFLICT DO
+    // UPDATE refuses to touch the same row twice in one command (SQLSTATE
+    // 21000), so a repeated key would fail the whole publish. And the choice of
+    // which occurrence is the real one belongs in code that can state it —
+    // first in, first served — rather than in whatever the database happens to
+    // do with the rest.
+    const firstByKey = new Map<string, CreateJobInput>();
+    for (const input of inputs) {
+      const key = jobKey(input.queueId, input.idempotencyKey);
+      if (!firstByKey.has(key)) {
+        firstByKey.set(key, input);
+      }
+    }
+
+    // Sorted so every publisher takes overlapping job row locks in the same
+    // order. Two batches sharing a pair of keys in opposite orders would
+    // otherwise be able to deadlock against each other.
+    const unique = [...firstByKey.values()].sort(
+      (a, b) =>
+        a.queueId - b.queueId ||
+        (a.idempotencyKey < b.idempotencyKey ? -1 : a.idempotencyKey > b.idempotencyKey ? 1 : 0)
+    );
 
     const idempotencyKeys: string[] = [];
     const payloads: string[] = [];
@@ -156,17 +206,12 @@ export class JobRepository {
     // independent caps, and `group_queue_limits` is keyed that way too.
     const groupLimits = new Map<string, { groupId: string; queueId: number; concurrency: number }>();
 
-    const seenKeys = new Set<string>();
-    for (const input of inputs) {
-      // PostgreSQL would reject this as a unique violation anyway, but only
-      // after the round trip and without naming which key collided.
-      if (seenKeys.has(input.idempotencyKey)) {
-        throw new ConflictError(
-          `Duplicate idempotencyKey "${input.idempotencyKey}" within the same batch`
-        );
-      }
-      seenKeys.add(input.idempotencyKey);
-
+    // Every column is pushed once per iteration, in one loop body with no
+    // branch around any push. `unnest` pads a short array with NULLs rather
+    // than raising, and `group_id` is the one nullable column here — a
+    // `groupIds` array that fell behind would silently produce ungrouped jobs
+    // that escape their concurrency cap. The loop shape is what rules that out.
+    for (const input of unique) {
       idempotencyKeys.push(input.idempotencyKey);
       payloads.push(input.payload);
       statuses.push(JobStatus.PENDING);
@@ -176,7 +221,7 @@ export class JobRepository {
       metadatas.push(JSON.stringify(input.metadata || {}));
 
       if (input.group?.id && input.group?.concurrency) {
-        const key = `${input.queueId}\u0000${input.group.id}`;
+        const key = groupKey(input.queueId, input.group.id);
         // First declaration wins. A later, differing concurrency for the same
         // group would be dropped by ON CONFLICT DO NOTHING regardless — the cap
         // belongs to whoever seeded the row first, batch or not.
@@ -202,18 +247,24 @@ export class JobRepository {
 
     let limitsCte = '';
     if (groupLimits.size > 0) {
-      // Sorted so every process seeds overlapping groups in the same order.
-      // Two batches touching the same pair of groups in opposite orders would
-      // otherwise be able to deadlock against each other on the row locks.
+      // Sorted for the same reason the job rows are.
       const limits = [...groupLimits.values()].sort(
-        (a, b) => a.queueId - b.queueId || (a.groupId < b.groupId ? -1 : a.groupId > b.groupId ? 1 : 0)
+        (a, b) =>
+          a.queueId - b.queueId || (a.groupId < b.groupId ? -1 : a.groupId > b.groupId ? 1 : 0)
       );
 
+      // The `ins` reference does nothing to the rows selected; it exists to pin
+      // this CTE after the job insert. Independent data-modifying CTEs run in
+      // unspecified order, and `ins` now takes row locks — seeding limits first
+      // would give publish a group → job lock order against settle's and pull's
+      // job → group, which is a cycle. Same device as `recoverJobs` uses to
+      // pin shard-then-group.
       limitsCte = `,
        limits AS (
          INSERT INTO group_queue_limits (group_id, queue_id, max_running, running, updated_at, created_at)
          SELECT g, q, m, 0, now(), now()
          FROM unnest($8::text[], $9::bigint[], $10::int[]) AS t(g, q, m)
+         WHERE (SELECT count(*) FROM ins) >= 0
          ON CONFLICT DO NOTHING
        )`;
       values.push(
@@ -223,35 +274,92 @@ export class JobRepository {
       );
     }
 
+    // `DO UPDATE` rather than `DO NOTHING`: RETURNING only reports rows the
+    // statement wrote, so a conflict that writes nothing comes back as no row at
+    // all and the publish would have to ask a second time who holds the key.
+    // That second statement is a race — the job can settle and be deleted in the
+    // gap — and the fix is not to retry it but to remove it. A conflict that
+    // writes gives its row back in the same statement, and PostgreSQL re-drives
+    // the insert internally if the conflicting row disappears mid-flight.
+    //
+    // `revision` is what separates the two outcomes: the column defaults to 0,
+    // so a row that comes back above 0 arrived through the conflict path. The
+    // system column `xmax` would report the same thing without a schema change,
+    // but only inside the RETURNING of the statement that wrote the row — read
+    // anywhere else it silently means something different. `revision` is real
+    // data and reads correctly everywhere.
+    //
+    // Nothing else is assigned. The existing job wins a duplicate publish with
+    // its `status`, `attempts`, `lease_seq` and `lease_expires_at` intact —
+    // clobbering any of those would break a job a worker is holding right now.
     const result = await executor.query(
       `WITH ins AS (
          INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
          SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::bigint[],
                               $6::int[], $7::jsonb[])
-         RETURNING ${JOB_COLUMNS}
+         ON CONFLICT (queue_id, idempotency_key)
+           DO UPDATE SET revision = jobs.revision + 1
+         RETURNING ${JOB_COLUMNS}, revision
        )${limitsCte}
        SELECT * FROM ins`,
       values
     );
 
     // RETURNING makes no promise about row order, so the batch is realigned on
-    // the one column guaranteed unique across it rather than on position.
-    const byKey = new Map<string, Job>();
+    // the key that identifies a job rather than on position. Every input has a
+    // row here — DO UPDATE returns on both paths — so a miss below is a broken
+    // invariant, not a race.
+    const resolved = new Map<string, PublishedJob>();
     for (const row of result.rows) {
       const job = this.deserializeJob(row as JobRow);
-      byKey.set(job.idempotencyKey, job);
+      resolved.set(jobKey(job.queueId, job.idempotencyKey), {
+        ...job,
+        deduplicated: Number(row.revision) > 0,
+      });
     }
 
+    const emitted = new Set<string>();
     return inputs.map((input) => {
-      const job = byKey.get(input.idempotencyKey);
+      const key = jobKey(input.queueId, input.idempotencyKey);
+      const job = resolved.get(key);
+
       if (!job) {
-        throw new InternalServerError(
-          `Batch publish did not return the job for idempotencyKey "${input.idempotencyKey}"`
+        throw new ConflictError(
+          `Could not publish "${input.idempotencyKey}" on queue ${input.queueId}: ` +
+            'the statement returned no row for it'
         );
       }
-      return job;
+
+      // The first occurrence of a key in the batch owns the insert; later ones
+      // describe the same row and are duplicates of it.
+      if (emitted.has(key)) {
+        return { ...job, deduplicated: true };
+      }
+      emitted.add(key);
+      return { ...job };
     });
   }
+
+
+
+  /** Live backlog for a queue. Terminal jobs are deleted, so this is all of it. */
+  async countByStatus(queueId: number): Promise<{ pending: number; processing: number }> {
+    const result = await this.pool.query(
+      `SELECT status, count(*)::int AS n FROM jobs WHERE queue_id = $1 GROUP BY status`,
+      [queueId]
+    );
+
+    const counts = { pending: 0, processing: 0 };
+    for (const row of result.rows) {
+      if (row.status === JobStatus.PENDING) {
+        counts.pending = row.n;
+      } else if (row.status === JobStatus.PROCESSING) {
+        counts.processing = row.n;
+      }
+    }
+    return counts;
+  }
+
 
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {
     const result = await this.pool.query(
@@ -420,7 +528,7 @@ export class JobRepository {
 
   // ---------------------------------------------------------------------------
   // Complete job
-  // ---------------------------------------------------------------------------
+  // ---------------------------------------------- -----------------------------
 
   /**
    * Fast path for completing jobs.
@@ -773,20 +881,20 @@ export class JobRepository {
     const metadata = this.deserializeMetadata(row.metadata);
 
     return {
-      id: row.id,
+      id: toNumber(row.id)!,
       idempotencyKey: row.idempotency_key,
       payload: row.payload,
-      queueShardNo: row.queue_shard_no,
+      queueShardNo: toNumber(row.queue_shard_no),
       status: row.status as JobStatus,
       groupId: row.group_id,
-      queueId: row.queue_id,
+      queueId: toNumber(row.queue_id)!,
       attempts: row.attempts,
       metadata,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: null,              // active jobs are never completed
       leaseExpiresAt: row.lease_expires_at,
-      lockSeq: row.lease_seq,
+      lockSeq: toNumber(row.lease_seq),
     };
   }
 

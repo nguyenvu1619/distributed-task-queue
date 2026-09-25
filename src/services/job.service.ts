@@ -1,6 +1,6 @@
 import { JobRepository } from '../repository/postgresql/job.repository';
 import { QueueRepository } from '../repository/postgresql/queue.repository';
-import { Job, JobStatus, CreateJobInput } from '../domain/job';
+import { Job, JobStatus, CreateJobInput, PublishedJob } from '../domain/job';
 import { Queue } from '../domain/queue';
 import { Executor } from '../domain/executor';
 
@@ -16,19 +16,27 @@ export class JobService {
 
   /**
    * Publishes a job. Pass `executor` (a `PoolClient` inside BEGIN/COMMIT, or any
-   * handle exposing `query(text, values)`) to have the job commit atomically with
-   * the caller's own writes — see `JobRepository.publishJob` for what that costs.
+   * handle exposing `query(text, values)`) to have the job commit atomically
+   * with the caller's own writes. A key a live job already holds comes back as
+   * that job with `deduplicated: true` rather than raising — see
+   * `JobRepository.publishJobs`.
    */
-  async publishJob(input: CreateJobInput, executor?: Executor): Promise<Job> {
+  async publishJob(input: CreateJobInput, executor?: Executor): Promise<PublishedJob> {
     return this.jobRepo.publishJob(input, executor);
   }
 
   /**
-   * Publishes many jobs in one statement — one round trip, all-or-nothing.
-   * Takes the same optional `executor` as `publishJob`.
+   * Publishes many jobs in one statement — one round trip, all-or-nothing —
+   * returning one result per input, in input order. Same `executor` and same
+   * deduplication rules as `publishJob`.
    */
-  async publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<Job[]> {
+  async publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<PublishedJob[]> {
     return this.jobRepo.publishJobs(inputs, executor);
+  }
+
+  /** Live PENDING/PROCESSING backlog for a queue. */
+  async countByStatus(queueId: number): Promise<{ pending: number; processing: number }> {
+    return this.jobRepo.countByStatus(queueId);
   }
 
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {

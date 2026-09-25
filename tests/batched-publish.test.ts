@@ -1,7 +1,6 @@
 import { PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { ConflictError } from '../src/domain/errors';
 import { Executor } from '../src/domain/executor';
 import { CreateJobInput, JobStatus } from '../src/domain/job';
 import {
@@ -139,37 +138,146 @@ describe('batched publish', () => {
     expect(await countByStatus(h.pool, second.id)).toMatchObject({ PENDING: 1 });
   });
 
-  it('rejects a duplicate idempotency key inside the batch before touching the database', async () => {
+  it('inserts a key repeated inside the batch once, and the FIRST occurrence is the fresh one', async () => {
     const queue = await h.queueService.createQueue(queueInput());
     const shared = uniqueName('dup');
     const inputs: CreateJobInput[] = [
-      jobInput(queue.id, { idempotencyKey: shared }),
+      jobInput(queue.id, { idempotencyKey: shared, payload: 'occurrence-1' }),
       jobInput(queue.id),
-      jobInput(queue.id, { idempotencyKey: shared }),
+      jobInput(queue.id, { idempotencyKey: shared, payload: 'occurrence-3' }),
     ];
 
-    const exec = countingExecutor();
-    await expect(h.jobService.publishJobs(inputs, exec)).rejects.toBeInstanceOf(ConflictError);
-    await expect(h.jobService.publishJobs(inputs, exec)).rejects.toThrow(shared);
+    const results = await h.jobService.publishJobs(inputs);
 
-    expect(exec.statements).toHaveLength(0);
-    expect(await countByStatus(h.pool, queue.id)).toMatchObject({ PENDING: 0 });
+    // Which occurrence wins is recorded here rather than left incidental: the
+    // first one in input order owns the insert, matching what ON CONFLICT
+    // DO NOTHING does with a repeated key inside one statement.
+    expect(results.map((r) => r.deduplicated)).toEqual([false, false, true]);
+    expect(results[2].id).toBe(results[0].id);
+    expect(results[0].payload).toBe('occurrence-1');
+    expect(results[2].payload).toBe('occurrence-1');
+
+    expect(await countByStatus(h.pool, queue.id)).toMatchObject({ PENDING: 2 });
   });
 
-  it('discards the whole batch when one key already exists', async () => {
+  it('deduplicates against keys already in the table and still lands the rest', async () => {
     const queue = await h.queueService.createQueue(queueInput());
     const taken = await h.jobService.publishJob(jobInput(queue.id));
 
-    await expect(
-      h.jobService.publishJobs([
-        jobInput(queue.id),
-        jobInput(queue.id, { idempotencyKey: taken.idempotencyKey }),
-        jobInput(queue.id),
-      ])
-    ).rejects.toThrow();
+    const results = await h.jobService.publishJobs([
+      jobInput(queue.id),
+      jobInput(queue.id, { idempotencyKey: taken.idempotencyKey }),
+      jobInput(queue.id),
+    ]);
 
-    // One statement is one transaction: the two valid jobs must not have landed.
-    expect(await countByStatus(h.pool, queue.id)).toMatchObject({ PENDING: 1 });
+    expect(results.map((r) => r.deduplicated)).toEqual([false, true, false]);
+    expect(results[1].id).toBe(taken.id);
+    // The two fresh jobs land — a duplicate no longer takes the batch with it.
+    expect(await countByStatus(h.pool, queue.id)).toMatchObject({ PENDING: 3 });
+  });
+
+  it('keeps the same key independent on different queues', async () => {
+    const first = await h.queueService.createQueue(queueInput());
+    const second = await h.queueService.createQueue(queueInput());
+    const shared = uniqueName('order');
+
+    const results = await h.jobService.publishJobs([
+      jobInput(first.id, { idempotencyKey: shared, payload: 'email' }),
+      jobInput(second.id, { idempotencyKey: shared, payload: 'invoice' }),
+    ]);
+
+    // Uniqueness is scoped to the queue: one business id backing a job on two
+    // queues is the point, not a collision.
+    expect(results.map((r) => r.deduplicated)).toEqual([false, false]);
+    expect(results[0].id).not.toBe(results[1].id);
+    expect(results.map((r) => r.queueId)).toEqual([first.id, second.id]);
+    expect(await countByStatus(h.pool, first.id)).toMatchObject({ PENDING: 1 });
+    expect(await countByStatus(h.pool, second.id)).toMatchObject({ PENDING: 1 });
+  });
+
+  it('frees a key once its job settles', async () => {
+    const queue = await h.queueService.createQueue(queueInput());
+    const key = uniqueName('reuse');
+
+    const first = await h.jobService.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+    const pulled = await h.jobRepo.pullJob(queue);
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+
+    // Terminal jobs are deleted, so the key is no longer held by anything live.
+    const again = await h.jobService.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+    expect(again.deduplicated).toBe(false);
+    expect(again.id).not.toBe(first.id);
+  });
+
+  it('resolves a duplicate in one statement, leaving no window for a read-back race', async () => {
+    const queue = await h.queueService.createQueue(queueInput());
+    const taken = await h.jobService.publishJob(jobInput(queue.id));
+
+    const exec = countingExecutor();
+    const [result] = await h.jobService.publishJobs(
+      [jobInput(queue.id, { idempotencyKey: taken.idempotencyKey })],
+      exec
+    );
+
+    // One statement is the whole point: a second one to ask who holds the key
+    // could find that job already settled and deleted. There is no second one.
+    expect(exec.statements).toHaveLength(1);
+    expect(result.deduplicated).toBe(true);
+    expect(result.id).toBe(taken.id);
+  });
+
+  it('leaves the lease of a job a worker is holding alone', async () => {
+    const queue = await h.queueService.createQueue(queueInput());
+    const published = await h.jobService.publishJob(jobInput(queue.id));
+    const leased = await h.jobRepo.pullJob(queue);
+    const before = await readJobRow(h.pool, leased!.id);
+
+    // A duplicate publish has to write the existing row for RETURNING to give it
+    // back. It writes `revision` and nothing else: clobbering status, attempts
+    // or lease_seq would break the worker mid-flight.
+    const dup = await h.jobService.publishJob(
+      jobInput(queue.id, { idempotencyKey: published.idempotencyKey, attempts: 99 })
+    );
+
+    expect(dup.deduplicated).toBe(true);
+    expect(await readJobRow(h.pool, leased!.id)).toEqual(before);
+
+    // And the worker can still settle it.
+    const settled = await h.jobRepo.completeJob(leased!.id, leased!.lockSeq!, queue);
+    expect(settled.id).toBe(leased!.id);
+  });
+
+  it('counts republishes in revision, starting from zero on a fresh insert', async () => {
+    const queue = await h.queueService.createQueue(queueInput());
+    const key = uniqueName('rev');
+    const revision = async () =>
+      Number(
+        (
+          await h.pool.query('SELECT revision FROM jobs WHERE queue_id = $1 AND idempotency_key = $2', [
+            queue.id,
+            key,
+          ])
+        ).rows[0].revision
+      );
+
+    const first = await h.jobService.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+    expect(first.deduplicated).toBe(false);
+    expect(await revision()).toBe(0);
+
+    for (const expected of [1, 2, 3]) {
+      const again = await h.jobService.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+      expect(again.deduplicated).toBe(true);
+      expect(again.id).toBe(first.id);
+      expect(await revision()).toBe(expected);
+    }
+
+    // A batch counts once per distinct key, not once per occurrence: repeats are
+    // collapsed before the statement runs.
+    await h.jobService.publishJobs([
+      jobInput(queue.id, { idempotencyKey: key }),
+      jobInput(queue.id, { idempotencyKey: key }),
+    ]);
+    expect(await revision()).toBe(4);
   });
 
   it('commits with the caller transaction, and vanishes with it on rollback', async () => {

@@ -155,6 +155,109 @@ const asExecutor = (trx: Knex.Transaction): Executor => ({
 });
 ```
 
+#### Batched Publish
+
+`publishJobs` takes an array and lands it as **one statement** — one round trip,
+one transaction, all or nothing. It accepts the same optional executor, so a
+batch can also ride inside your own transaction.
+
+```typescript
+const jobs = await jobService.publishJobs(
+  orders.map((order) => ({
+    idempotencyKey: `order-confirmation-${order.id}`,
+    payload: JSON.stringify({ orderId: order.id }),
+    queueId: queue.id,
+  }))
+);
+// jobs[i] corresponds to orders[i]
+```
+
+The rows travel as parallel arrays through `unnest`, not as a generated `VALUES`
+list, so the statement uses a fixed ten bind parameters no matter how large the
+batch is. A 10,000-job batch is one statement, not a chunked loop — chunking is
+what would silently cost the all-or-nothing guarantee.
+
+Batches may mix queues and groups freely. Group caps are seeded once per
+`(queue, group)` pair, and an existing cap is left alone — the same
+`ON CONFLICT DO NOTHING` rule as a single publish.
+
+**On batch size.** There is no enforced cap — the statement has no parameter
+ceiling to hit, so nothing in the implementation forces one. Practical guidance:
+keep a batch in the low thousands. What grows with batch size is the transaction
+itself — lock duration, WAL volume, and how long one pooled connection is tied
+up — not the round-trip count. For reference, Sidekiq's `push_bulk` and Oban's
+`insert_all` both default to slicing at 1,000; River, BullMQ, pg-boss and
+Graphile Worker document no limit at all. If you need to publish far more than
+that, chunk it yourself — that way you choose the atomicity you want, rather
+than having this library silently split one all-or-nothing batch into several
+that are not.
+
+Two things to know:
+
+- **Jobs in one batch share a `created_at`.** `now()` is the transaction's start
+  time, and pulls order by `created_at`, so jobs within a single batch come out
+  in no particular order relative to each other. Ordering across batches is
+  unaffected. If you need strict FIFO inside a batch, publish individually.
+- **A key repeated inside one batch is inserted once.** Repeats are collapsed
+  before the statement runs; the **first** occurrence owns the row and reports
+  `deduplicated: false`, later occurrences describe the same row with
+  `deduplicated: true`. A duplicate no longer takes the rest of the batch down
+  with it.
+
+#### Deduplicating Publish
+
+Publishing an `idempotencyKey` that a live job already holds returns **that job**
+with `deduplicated: true` instead of raising, so a retrying publisher gets
+exactly one job and exactly one delivery.
+
+```typescript
+const first  = await jobService.publishJob({ idempotencyKey: 'order-123', ... });
+const second = await jobService.publishJob({ idempotencyKey: 'order-123', ... });
+
+first.deduplicated;   // false — this call inserted the row
+second.deduplicated;  // true  — a live job already held the key
+second.id === first.id;  // true, and only one row exists
+```
+
+This matters most inside a transaction. PostgreSQL aborts the **entire**
+enclosing transaction on an unhandled constraint violation, so a publish that
+raised on a duplicate would take the caller's business writes down with it —
+the exact failure the `executor` argument exists to prevent. Returning the
+existing job leaves the transaction usable.
+
+**Keys are scoped to their queue.** `UNIQUE (queue_id, idempotency_key)`, so one
+business id can back a job on the email queue and another on the invoicing queue
+without either displacing the other:
+
+```typescript
+await jobService.publishJobs([
+  { idempotencyKey: 'order-123', queueId: emailQueue.id,   payload: ... },
+  { idempotencyKey: 'order-123', queueId: invoiceQueue.id, payload: ... },
+]);
+// two jobs, both deduplicated: false
+```
+
+**A key is only reserved while its job is alive.** Completed and failed jobs are
+deleted, which frees the key — so the dedup window is the job's lifetime, not
+for ever. Republishing `order-123` after its job finished creates a new job.
+
+**It is one statement.** The insert and the conflict are resolved together via
+`ON CONFLICT ... DO UPDATE ... RETURNING`, so the publish never has to ask a
+second time who holds a key — which is where a duplicate could otherwise slip
+away between statements by settling and being deleted. PostgreSQL re-drives the
+insert internally if the conflicting row disappears mid-flight.
+
+A duplicate does write the row it resolves to — that write is what makes
+`RETURNING` hand the row back — but it writes only `jobs.revision`, a counter of
+how many publishes have landed on that row after the first. `status`, `attempts`
+and the lease columns are left alone, so a job a worker is holding right now is
+unaffected.
+
+The cost is a row lock on that job, held until **your** transaction commits.
+`pullJob` and the reaper both use `SKIP LOCKED` and step around it, but that one
+job's `completeJob`/`failJob` waits — one more reason to keep the transaction
+short.
+
 #### Worker Example
 
 ```typescript
@@ -248,11 +351,21 @@ reaper.start();
 
 ### JobService
 
-#### `publishJob(input: CreateJobInput, executor?: Executor): Promise<Job>`
+#### `publishJob(input: CreateJobInput, executor?: Executor): Promise<PublishedJob>`
 Publishes a new job to the queue. Pass `executor` — an open `PoolClient`, or any
 handle exposing `query(text, values)` — to enrol the insert in your own
-transaction so the job commits with your business writes. See
-[Transactional Publish](#transactional-publish-no-outbox-table).
+transaction so the job commits with your business writes. A key a live job
+already holds comes back as that job with `deduplicated: true` rather than
+raising. See [Transactional Publish](#transactional-publish-no-outbox-table) and
+[Deduplicating Publish](#deduplicating-publish).
+
+#### `publishJobs(inputs: CreateJobInput[], executor?: Executor): Promise<PublishedJob[]>`
+Publishes many jobs as a single statement — one round trip, all-or-nothing.
+Returns one result per input, in input order. See
+[Batched Publish](#batched-publish).
+
+#### `countByStatus(queueId: number): Promise<{ pending: number; processing: number }>`
+Live backlog for a queue. Terminal jobs are deleted, so this is all of it.
 
 #### `pullJob(queueId: number): Promise<Job | null>`
 Pulls and locks a job from the specified queue. Returns `null` if no jobs are available.

@@ -1,4 +1,4 @@
-import { PoolClient } from 'pg';
+import { PoolClient, types } from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { Executor } from '../src/domain/executor';
@@ -138,6 +138,66 @@ describe('transactional publish', () => {
     const job = await h.jobService.publishJob(jobInput(queue.id));
 
     expect(await readJobRow(h.pool, job.id)).toMatchObject({ status: JobStatus.PENDING });
+  });
+
+  it('deduplicates inside a caller transaction without aborting it', async () => {
+    const queue = await h.queueService.createQueue(queueInput());
+    const key = uniqueName('dupe');
+    const orderId = uniqueName('order');
+    const first = await h.jobService.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+
+    const tx = await h.pool.connect();
+    try {
+      await tx.query('BEGIN');
+      await tx.query(`INSERT INTO ${ORDERS} (id) VALUES ($1)`, [orderId]);
+
+      const second = await h.jobService.publishJob(
+        jobInput(queue.id, { idempotencyKey: key }),
+        tx
+      );
+      expect(second.deduplicated).toBe(true);
+      expect(second.id).toBe(first.id);
+
+      // The whole point of not raising: a unique violation here would have
+      // aborted the transaction and taken the order row with it. Prove the
+      // transaction is still usable rather than merely un-thrown.
+      const probe = await tx.query('SELECT 1 AS ok');
+      expect(probe.rows[0].ok).toBe(1);
+      await tx.query('COMMIT');
+    } finally {
+      tx.release();
+    }
+
+    const { rows } = await h.pool.query(`SELECT id FROM ${ORDERS} WHERE id = $1`, [orderId]);
+    expect(rows).toHaveLength(1);
+  });
+
+  it('coerces bigint columns even on a client whose pg has no INT8 parser', async () => {
+    const queue = await h.queueService.createQueue(queueInput({ concurrency: 4 }));
+
+    // A caller handing us a client from their own copy of pg has not run this
+    // package's types.setTypeParser, so BIGINT arrives as a string. Simulated by
+    // restoring the driver default for the duration of the publish.
+    const restore = types.getTypeParser(types.builtins.INT8, 'text');
+    types.setTypeParser(types.builtins.INT8, (value: string) => value);
+
+    let job;
+    const tx = await h.pool.connect();
+    try {
+      await tx.query('BEGIN');
+      job = await h.jobService.publishJob(jobInput(queue.id), tx);
+      await tx.query('COMMIT');
+    } finally {
+      tx.release();
+      types.setTypeParser(types.builtins.INT8, restore);
+    }
+
+    // lockSeq feeds `lease_seq + 1` in the fencing path; a string there turns
+    // that arithmetic into concatenation.
+    expect(typeof job.id).toBe('number');
+    expect(typeof job.queueId).toBe('number');
+    expect(job.queueId).toBe(queue.id);
+    expect(job.lockSeq === null || typeof job.lockSeq === 'number').toBe(true);
   });
 
   it('accepts any handle that can run a query, not just a pg client', async () => {

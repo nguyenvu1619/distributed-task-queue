@@ -28,6 +28,19 @@ export interface Job {
   queueShardNo: number | null;
 }
 
+/**
+ * What a publish hands back.
+ *
+ * `deduplicated` distinguishes the two ways a publish succeeds: `false` means
+ * this call inserted the row, `true` means a live job already held the key and
+ * is being returned instead. A key is only reserved while its job is alive —
+ * completed and failed jobs are deleted, which frees the key for reuse — so
+ * the dedup window is the job's lifetime, not for ever.
+ */
+export interface PublishedJob extends Job {
+  deduplicated: boolean;
+}
+
 export interface Group{
     id: string;
     concurrency: number;

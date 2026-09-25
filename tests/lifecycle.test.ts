@@ -151,14 +151,22 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     expect(job.attempts).toBe(0);
   });
 
-  it('rejects a duplicate idempotency key', async () => {
+  it('returns the live job for a duplicate idempotency key instead of raising', async () => {
     const queue = await fastQueue();
     const key = uniqueName('dupe');
 
-    await h.jobRepo.publishJob(jobInput(queue.id, { idempotencyKey: key }));
-    await expect(
-      h.jobRepo.publishJob(jobInput(queue.id, { idempotencyKey: key }))
-    ).rejects.toMatchObject({ code: '23505' });
+    const first = await h.jobRepo.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+    const second = await h.jobRepo.publishJob(jobInput(queue.id, { idempotencyKey: key }));
+
+    expect(first.deduplicated).toBe(false);
+    expect(second.deduplicated).toBe(true);
+    expect(second.id).toBe(first.id);
+
+    const { rows } = await h.pool.query(
+      'SELECT count(*)::int AS n FROM jobs WHERE queue_id = $1',
+      [queue.id]
+    );
+    expect(rows[0].n).toBe(1);
   });
 
   it('returns null when the queue is empty', async () => {
@@ -550,5 +558,36 @@ describe('domain mapping', () => {
     const listed = await h.jobRepo.pullJobs(JobStatus.PENDING, 10);
     expect(listed).toHaveLength(2);
     expect(listed.every((j) => j.leaseExpiresAt === null)).toBe(true);
+  });
+});
+
+describe('queue backlog', () => {
+  it('reports zero for a queue nothing was published to', async () => {
+    const queue = await h.queueService.createQueue(queueInput());
+    expect(await h.jobRepo.countByStatus(queue.id)).toEqual({ pending: 0, processing: 0 });
+  });
+
+  it('moves a job from pending to processing and drops it once terminal', async () => {
+    const queue = await h.queueService.createQueue(queueInput());
+    await h.jobService.publishJobs([jobInput(queue.id), jobInput(queue.id), jobInput(queue.id)]);
+
+    expect(await h.jobRepo.countByStatus(queue.id)).toEqual({ pending: 3, processing: 0 });
+
+    const leased = await h.jobRepo.pullJob(queue);
+    expect(await h.jobRepo.countByStatus(queue.id)).toEqual({ pending: 2, processing: 1 });
+
+    // Terminal jobs are deleted, so the backlog is the whole story — a settled
+    // job leaves no residue in either count.
+    await h.jobRepo.completeJob(leased!.id, leased!.lockSeq!, queue);
+    expect(await h.jobRepo.countByStatus(queue.id)).toEqual({ pending: 2, processing: 0 });
+  });
+
+  it('counts only the queue it was asked about', async () => {
+    const first = await h.queueService.createQueue(queueInput());
+    const second = await h.queueService.createQueue(queueInput());
+    await h.jobService.publishJobs([jobInput(first.id), jobInput(first.id), jobInput(second.id)]);
+
+    expect(await h.jobRepo.countByStatus(first.id)).toEqual({ pending: 2, processing: 0 });
+    expect(await h.jobRepo.countByStatus(second.id)).toEqual({ pending: 1, processing: 0 });
   });
 });
