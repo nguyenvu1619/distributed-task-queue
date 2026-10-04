@@ -61,17 +61,23 @@ export class WorkerService {
         try {
           const payload = JSON.parse(job.payload);
           await this.options.handler(job, payload);
-          await this.jobService.completeJobDirect(job.id, job.lockSeq!, queue);
+          
         } catch (handlerError) {
           console.error(`[Worker] Slot ${slotIndex} failed job ${job.id}:`, handlerError);
           try {
-            await this.jobService.failJobDirect(job.id, job.lockSeq!, queue);
+            await this.jobService.failJobDirect(job.id, job.lockSeq, queue);
           } catch (failError) {
             console.error(
               `[Worker] Slot ${slotIndex} could not fail job ${job.id}:`,
               failError,
             );
           }
+          continue
+        }
+        try {
+        await this.jobService.completeJobDirect(job.id, job.lockSeq, queue);
+        } catch (completeError){
+          console.error(`[Worker] Complete ${slotIndex} error:`, completeError)
         }
       } catch (slotError) {
         console.error(`[Worker] Slot ${slotIndex} error:`, slotError);

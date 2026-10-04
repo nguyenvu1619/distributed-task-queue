@@ -104,10 +104,10 @@ export async function runRace(
       try {
         if (holdMs > 0) await sleep(holdMs);
         if (decision === 'complete') {
-          await harness.jobRepo.completeJob(job.id, job.lockSeq!, queue);
+          await harness.jobRepo.completeJob(job.id, job.lockSeq, queue);
           result.completedIds.push(id);
         } else {
-          await harness.jobRepo.failJob(job.id, job.lockSeq!, queue);
+          await harness.jobRepo.failJob(job.id, job.lockSeq, queue);
           result.failedIds.push(id);
         }
       } catch (err) {

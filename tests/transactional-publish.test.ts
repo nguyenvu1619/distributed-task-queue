@@ -197,7 +197,7 @@ describe('transactional publish', () => {
     expect(typeof job.id).toBe('number');
     expect(typeof job.queueId).toBe('number');
     expect(job.queueId).toBe(queue.id);
-    expect(job.lockSeq === null || typeof job.lockSeq === 'number').toBe(true);
+    expect(typeof job.lockSeq).toBe('number');
   });
 
   it('accepts any handle that can run a query, not just a pg client', async () => {

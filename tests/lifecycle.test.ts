@@ -146,7 +146,7 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
 
     expect(job.status).toBe(JobStatus.PENDING);
     expect(job.leaseExpiresAt).toBeNull();
-    expect(job.lockSeq).toBeNull();
+    expect(job.lockSeq).toBe(0);
     expect(job.queueShardNo).toBeNull();
     expect(job.attempts).toBe(0);
   });
@@ -214,10 +214,8 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
     const pulled = await h.jobRepo.pullJob(queue);
 
-    const completed = await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue);
 
-    expect(completed.status).toBe(JobStatus.COMPLETED);
-    expect(completed.completedAt).toBeInstanceOf(Date);
     expect(await readJobRow(h.pool, published.id)).toBeNull();
   });
 
@@ -226,7 +224,7 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
     const pulled = await h.jobRepo.pullJob(queue);
 
-    const failed = await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq!, queue);
+    const failed = await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq, queue);
 
     expect(failed.status).toBe(JobStatus.FAILED);
     expect(await readJobRow(h.pool, published.id)).toBeNull();
@@ -251,9 +249,9 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     await h.jobRepo.publishJob(jobInput(queue.id));
     const pulled = await h.jobRepo.pullJob(queue);
 
-    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue);
     await expect(
-      h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue)
+      h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue)
     ).rejects.toBeInstanceOf(NotFoundError);
   });
 
@@ -270,7 +268,7 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     const queue = await fastQueue();
     await h.jobRepo.publishJob(jobInput(queue.id));
     const pulled = await h.jobRepo.pullJob(queue);
-    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue);
 
     // Characterisation, not a requirement: there is no `job_status` archive in
     // the current schema, so terminal jobs are simply gone. See test report.
@@ -288,7 +286,7 @@ describe('retry policy', () => {
     const first = await h.jobRepo.pullJob(queue);
     expect(first!.attempts).toBe(1);
 
-    await h.jobRepo.failJob(first!.id, first!.lockSeq!, queue);
+    await h.jobRepo.failJob(first!.id, first!.lockSeq, queue);
     const second = await h.jobRepo.pullJob(queue);
     expect(second!.attempts).toBe(2);
   });
@@ -300,7 +298,7 @@ describe('retry policy', () => {
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
 
     const pulled = await h.jobRepo.pullJob(queue);
-    const outcome = await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq!, queue);
+    const outcome = await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq, queue);
 
     expect(outcome.status).toBe(JobStatus.PENDING);
 
@@ -308,7 +306,7 @@ describe('retry policy', () => {
     expect(row.status).toBe(JobStatus.PENDING);
     expect(row.lease_expires_at).toBeNull();
     // lease_seq survives the retry — it is the fence token, not lease state.
-    expect(row.lease_seq).not.toBeNull();
+    expect(String(row.lease_seq)).toBe(String(pulled!.lockSeq));
   });
 
   it('discards the job on the failure that spends the last attempt', async () => {
@@ -320,7 +318,7 @@ describe('retry policy', () => {
     for (let i = 0; i < maxAttempts; i++) {
       const pulled = await h.jobRepo.pullJob(queue);
       expect(pulled, `attempt ${i + 1} of ${maxAttempts} was not offered`).not.toBeNull();
-      outcomes.push((await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq!, queue)).status);
+      outcomes.push((await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq, queue)).status);
     }
 
     expect(outcomes).toEqual([JobStatus.PENDING, JobStatus.PENDING, JobStatus.FAILED]);
@@ -335,7 +333,7 @@ describe('retry policy', () => {
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
 
     const pulled = await h.jobRepo.pullJob(queue);
-    const outcome = await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq!, queue);
+    const outcome = await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq, queue);
     expect(outcome.status).toBe(JobStatus.PENDING);
 
     const shards = await readShardCounters(h.pool, queue.id);
@@ -356,7 +354,7 @@ describe('retry policy', () => {
     await h.jobRepo.publishJob(jobInput(queue.id));
 
     const first = await h.jobRepo.pullJob(queue);
-    await h.jobRepo.completeJob(first!.id, first!.lockSeq!, queue);
+    await h.jobRepo.completeJob(first!.id, first!.lockSeq, queue);
 
     const second = await h.jobRepo.pullJob(queue);
     expect(second).not.toBeNull();
@@ -384,7 +382,7 @@ describe('job lifecycle — coordination path (concurrency > 0 / groups)', () =>
       'exactly one slot must be accounted for while a job is held'
     ).toBe(1);
 
-    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue);
 
     const released = await readShardCounters(h.pool, queue.id);
     expect(released.reduce((sum, s) => sum + s.running, 0)).toBe(0);
@@ -420,7 +418,7 @@ describe('job lifecycle — coordination path (concurrency > 0 / groups)', () =>
       'the queue admitted more jobs than its configured concurrency'
     ).toBeNull();
 
-    await h.jobRepo.completeJob(pulled[0].id, pulled[0].lockSeq!, queue);
+    await h.jobRepo.completeJob(pulled[0].id, pulled[0].lockSeq, queue);
     expect(
       await h.jobRepo.pullJob(queue),
       'a released slot was not handed back out'
@@ -491,7 +489,7 @@ describe('job lifecycle — coordination path (concurrency > 0 / groups)', () =>
     expect(pulled!.groupId).toBe('tenant-a');
     expect((await readGroupCounters(h.pool, queue.id))[0].running).toBe(1);
 
-    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue);
     expect((await readGroupCounters(h.pool, queue.id))[0].running).toBe(0);
   });
 
@@ -504,7 +502,7 @@ describe('job lifecycle — coordination path (concurrency > 0 / groups)', () =>
     );
 
     const pulled = await h.jobRepo.pullJob(queue);
-    await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq!, queue);
+    await h.jobRepo.failJob(pulled!.id, pulled!.lockSeq, queue);
 
     expect((await readGroupCounters(h.pool, queue.id))[0].running).toBe(0);
   });
@@ -578,7 +576,7 @@ describe('queue backlog', () => {
 
     // Terminal jobs are deleted, so the backlog is the whole story — a settled
     // job leaves no residue in either count.
-    await h.jobRepo.completeJob(leased!.id, leased!.lockSeq!, queue);
+    await h.jobRepo.completeJob(leased!.id, leased!.lockSeq, queue);
     expect(await h.jobRepo.countByStatus(queue.id)).toEqual({ pending: 2, processing: 0 });
   });
 

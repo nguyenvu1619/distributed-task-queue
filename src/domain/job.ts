@@ -24,7 +24,12 @@ export interface Job {
   completedAt: Date | null;
   leaseExpiresAt: Date | null;
   queueId: number;
-  lockSeq: number | null;
+  /**
+   * Fence token for the current lease. 0 means the job has never been leased;
+   * every pull takes the next value, so a settle is accepted only when it
+   * carries the token of the lease still in force.
+   */
+  lockSeq: number;
   queueShardNo: number | null;
 }
 

@@ -26,3 +26,17 @@ export class BadParamInputError extends Error {
   }
 }
 
+export class NonRetryableError extends Error {
+  constructor(message: string = 'Job is not retryable') {
+    super(message);
+    this.name = 'NonRetryableError';
+  }
+}
+
+export class JobSnooze extends Error {
+  constructor(message: string = 'Job Snooze'){
+    super(message);
+    this.name = 'JobSnooze'
+  }
+}
+

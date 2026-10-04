@@ -201,7 +201,7 @@ describe('batched publish', () => {
 
     const first = await h.jobService.publishJob(jobInput(queue.id, { idempotencyKey: key }));
     const pulled = await h.jobRepo.pullJob(queue);
-    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq!, queue);
+    await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue);
 
     // Terminal jobs are deleted, so the key is no longer held by anything live.
     const again = await h.jobService.publishJob(jobInput(queue.id, { idempotencyKey: key }));
@@ -242,9 +242,10 @@ describe('batched publish', () => {
     expect(dup.deduplicated).toBe(true);
     expect(await readJobRow(h.pool, leased!.id)).toEqual(before);
 
-    // And the worker can still settle it.
-    const settled = await h.jobRepo.completeJob(leased!.id, leased!.lockSeq!, queue);
-    expect(settled.id).toBe(leased!.id);
+    // And the worker can still settle it — the settle is accepted (no
+    // NotFoundError from a clobbered lease_seq) and the row is gone.
+    await h.jobRepo.completeJob(leased!.id, leased!.lockSeq, queue);
+    expect(await readJobRow(h.pool, leased!.id)).toBeNull();
   });
 
   it('counts republishes in revision, starting from zero on a fresh insert', async () => {

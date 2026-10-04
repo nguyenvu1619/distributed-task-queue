@@ -132,7 +132,7 @@ describe('crash recovery — a worker killed mid-job', () => {
     ).rejects.toBeInstanceOf(NotFoundError);
 
     // The rightful owner can still settle.
-    await h.jobRepo.completeJob(retaken!.id, retaken!.lockSeq!, queue);
+    await h.jobRepo.completeJob(retaken!.id, retaken!.lockSeq, queue);
   });
 });
 
@@ -181,7 +181,7 @@ describe('lease fencing (deterministic — lease forced to expire)', () => {
     expect(current).not.toBeNull();
 
     await expect(
-      h.jobRepo.failJob(published.id, stale!.lockSeq!, queue)
+      h.jobRepo.failJob(published.id, stale!.lockSeq, queue)
     ).rejects.toBeInstanceOf(NotFoundError);
 
     // The job is still owned by the current lease holder, untouched.
@@ -203,7 +203,7 @@ describe('lease fencing (deterministic — lease forced to expire)', () => {
     expect(current, 'reaper did not return the coordinated job to the queue').not.toBeNull();
 
     await expect(
-      h.jobRepo.completeJob(published.id, stale!.lockSeq!, queue)
+      h.jobRepo.completeJob(published.id, stale!.lockSeq, queue)
     ).rejects.toBeInstanceOf(NotFoundError);
   });
 });

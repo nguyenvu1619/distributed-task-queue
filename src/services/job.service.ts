@@ -59,15 +59,15 @@ export class JobService {
   }
 
   // Requires two extra lookups (job + queue) on every call.
-  async completeJob(id: number, lockSeq: number): Promise<Job> {
+  async completeJob(id: number, lockSeq: number): Promise<void> {
     const job = await this.jobRepo.getById(id);
     const queue = await this.queueRepo.getById(job.queueId);
-    return this.jobRepo.completeJob(id, lockSeq, queue);
+    await this.jobRepo.completeJob(id, lockSeq, queue);
   }
 
   // Pass a pre-resolved Queue to skip both lookups.
-  async completeJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
-    return this.jobRepo.completeJob(id, lockSeq, queue);
+  async completeJobDirect(id: number, lockSeq: number, queue: Queue): Promise<void> {
+    await this.jobRepo.completeJob(id, lockSeq, queue);
   }
 
   // Requires two extra lookups (job + queue) on every call.
@@ -78,7 +78,7 @@ export class JobService {
   }
 
   // Pass a pre-resolved Queue to skip both lookups.
-  async failJobDirect(id: number, lockSeq: number, queue: Queue): Promise<Job> {
-    return this.jobRepo.failJob(id, lockSeq, queue);
+  async failJobDirect(id: number, lockSeq: number, queue: Queue): Promise<void> {
+    await this.jobRepo.failJob(id, lockSeq, queue);
   }
 }

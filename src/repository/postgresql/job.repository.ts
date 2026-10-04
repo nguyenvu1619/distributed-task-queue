@@ -26,7 +26,7 @@ interface JobRow {
   queue_shard_no: number | string | null;
   created_at: Date;
   updated_at: Date;
-  lease_seq: number | string | null;
+  lease_seq: number | string;
   lease_expires_at: Date | null;
 }
 
@@ -382,7 +382,7 @@ export class JobRepository {
       `UPDATE jobs
        SET status = 'PROCESSING',
            lease_expires_at = now() + ($1 || ' milliseconds')::interval,
-           lease_seq = COALESCE(lease_seq, 0) + 1,
+           lease_seq = lease_seq + 1,
            attempts = attempts + 1,
            updated_at = now()
        WHERE id = (
@@ -482,7 +482,7 @@ export class JobRepository {
          SET status = 'PROCESSING',
              lease_expires_at = now() + ($1 || ' milliseconds')::interval,
              queue_shard_no = a.shard_no,
-             lease_seq = COALESCE(j.lease_seq, 0) + 1,
+             lease_seq = j.lease_seq + 1,
              attempts = j.attempts + 1,
              updated_at = now()
          FROM admitted a
@@ -548,12 +548,15 @@ export class JobRepository {
       throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
     }
 
+    // The row is gone, so what comes back is a record of the job as it settled,
+    // not a live handle. It keeps the token it was settled with rather than
+    // blanking it — there is no lease left to fence, and the caller asked to
+    // settle exactly this one.
     const completedAt = new Date();
     return {
       ...this.deserializeJob(result.rows[0] as JobRow),
       status: JobStatus.COMPLETED,
       completedAt,
-      lockSeq: null,
       leaseExpiresAt: null,
     };
   }
@@ -564,19 +567,11 @@ export class JobRepository {
    * virtue of being a single statement rather than a transaction.
    * Use when queue.concurrency > 0 OR queue.requiresGroupId === true
    */
-  private async completeJobWithCoordination(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+  private async completeJobWithCoordination(id: number, lockSeq: number, queue: Queue): Promise<void> {
     const row = await this.deleteWithCoordination(id, lockSeq, queue);
     if (!row) {
       throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
     }
-
-    return {
-      ...this.deserializeJob(row),
-      status: JobStatus.COMPLETED,
-      completedAt: new Date(),
-      lockSeq: null,
-      leaseExpiresAt: null,
-    };
   }
 
   /**
@@ -635,11 +630,12 @@ export class JobRepository {
    * Public API: marks a job as completed
    * Automatically selects fast or full path based on queue configuration
    */
-  async completeJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+  async completeJob(id: number, lockSeq: number, queue: Queue): Promise<void> {
     if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
-      return this.completeJobFast(id, lockSeq);
+      await this.completeJobFast(id, lockSeq);
+      return
     }
-    return this.completeJobWithCoordination(id, lockSeq, queue);
+    await this.completeJobWithCoordination(id, lockSeq, queue);
   }
 
   // ---------------------------------------------------------------------------
@@ -689,7 +685,6 @@ export class JobRepository {
       ...this.deserializeJob(row as JobRow),
       status: JobStatus.FAILED,
       completedAt: new Date(),
-      lockSeq: null,
       leaseExpiresAt: null,
     };
   }
@@ -763,7 +758,6 @@ export class JobRepository {
       ...this.deserializeJob(row as JobRow),
       status: JobStatus.FAILED,
       completedAt: new Date(),
-      lockSeq: null,
       leaseExpiresAt: null,
     };
   }
@@ -894,7 +888,7 @@ export class JobRepository {
       updatedAt: row.updated_at,
       completedAt: null,              // active jobs are never completed
       leaseExpiresAt: row.lease_expires_at,
-      lockSeq: toNumber(row.lease_seq),
+      lockSeq: toNumber(row.lease_seq)!,
     };
   }
 

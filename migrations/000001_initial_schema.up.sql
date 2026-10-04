@@ -41,7 +41,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at        TIMESTAMPTZ NULL,
-    lease_seq           BIGINT NULL,
+    -- The fence token, and the reason a settle from a crashed worker is
+    -- refused: each lease takes the next value, so a token is only ever valid
+    -- for the lease that minted it.
+    --
+    -- NOT NULL because 0 already says "never leased" — pull hands out 1 for the
+    -- first lease and only ever climbs, so 0 can never name a live lease. A
+    -- nullable column would buy no extra state and cost three-valued logic in
+    -- every `lease_seq = $n` gate, where a NULL token matches no row and the
+    -- settle fails as "job not found" instead of as the bug it is.
+    lease_seq           BIGINT NOT NULL DEFAULT 0,
     lease_expires_at    TIMESTAMPTZ NULL,
     CONSTRAINT fk_job_queue FOREIGN KEY (queue_id) REFERENCES queues(id) ON DELETE CASCADE
 );
