@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { JobStatus } from '../src/domain/job';
 import { CreateQueueInput, NUMBER_OF_SHARD } from '../src/domain/queue';
-import { NotFoundError } from '../src/domain/errors';
+import { JobNotFoundError, LeaseLostError, QueueNotFoundError } from '../src/domain/errors';
 import { Logger, silentLogger } from '../src/domain/logger';
 import { QueueRepository } from '../src/repository/postgresql/queue.repository';
 import {
@@ -126,7 +126,7 @@ describe('queue lifecycle', () => {
   });
 
   it('rejects a lookup for an unknown queue', async () => {
-    await expect(h.queueService.getQueue(999_999)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(h.queueService.getQueue(999_999)).rejects.toBeInstanceOf(QueueNotFoundError);
   });
 
   it('lists queues', async () => {
@@ -237,7 +237,7 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
 
     await expect(
       h.jobRepo.completeJob(pulled!.id, Number(pulled!.lockSeq) + 99, queue)
-    ).rejects.toBeInstanceOf(NotFoundError);
+    ).rejects.toBeInstanceOf(LeaseLostError);
 
     // ...and the job is untouched by the rejected attempt.
     const row = await readJobRow(h.pool, pulled!.id);
@@ -252,7 +252,7 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     await h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue);
     await expect(
       h.jobRepo.completeJob(pulled!.id, pulled!.lockSeq, queue)
-    ).rejects.toBeInstanceOf(NotFoundError);
+    ).rejects.toBeInstanceOf(LeaseLostError);
   });
 
   it('rejects settling a job that was never pulled', async () => {
@@ -260,7 +260,7 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
 
     await expect(h.jobRepo.completeJob(published.id, 1, queue)).rejects.toBeInstanceOf(
-      NotFoundError
+      LeaseLostError
     );
   });
 
@@ -272,7 +272,7 @@ describe('job lifecycle — fast path (concurrency = 0, no groups)', () => {
 
     // Characterisation, not a requirement: there is no `job_status` archive in
     // the current schema, so terminal jobs are simply gone. See test report.
-    await expect(h.jobRepo.getById(pulled!.id)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(h.jobRepo.getById(pulled!.id)).rejects.toBeInstanceOf(JobNotFoundError);
   });
 });
 

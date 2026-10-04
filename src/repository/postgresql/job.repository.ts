@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 import { Job, JobStatus, CreateJobInput, Metadata, PublishedJob } from '../../domain/job';
 import { Queue } from '../../domain/queue';
-import { ConflictError, NotFoundError } from '../../domain/errors';
+import { JobNotFoundError, LeaseLostError, PublishInvariantError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
 import { Executor } from '../../domain/executor';
 
@@ -81,7 +81,7 @@ export class JobRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Job with id ${id} not found`);
+      throw new JobNotFoundError(`Job with id ${id} not found`);
     }
 
     return this.deserializeJob(result.rows[0] as JobRow);
@@ -159,7 +159,7 @@ export class JobRepository {
    * jobs within one batch come out in no particular order relative to each
    * other. Order across batches is unaffected.
    *
-   * @throws ConflictError if the statement returns no row for an input. There is
+   * @throws PublishInvariantError if the statement returns no row for an input. There is
    * no known way to reach this — DO UPDATE returns on both the insert and the
    * conflict path — so it guards an invariant rather than a race.
    */
@@ -324,7 +324,7 @@ export class JobRepository {
       const job = resolved.get(key);
 
       if (!job) {
-        throw new ConflictError(
+        throw new PublishInvariantError(
           `Could not publish "${input.idempotencyKey}" on queue ${input.queueId}: ` +
             'the statement returned no row for it'
         );
@@ -545,7 +545,7 @@ export class JobRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+      throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
     }
 
     // The row is gone, so what comes back is a record of the job as it settled,
@@ -570,7 +570,7 @@ export class JobRepository {
   private async completeJobWithCoordination(id: number, lockSeq: number, queue: Queue): Promise<void> {
     const row = await this.deleteWithCoordination(id, lockSeq, queue);
     if (!row) {
-      throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+      throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
     }
   }
 
@@ -673,7 +673,7 @@ export class JobRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+      throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
     }
 
     const row = result.rows[0];
@@ -746,7 +746,7 @@ export class JobRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+      throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
     }
 
     const row = result.rows[0];

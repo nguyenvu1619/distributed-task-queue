@@ -243,7 +243,7 @@ describe('batched publish', () => {
     expect(await readJobRow(h.pool, leased!.id)).toEqual(before);
 
     // And the worker can still settle it — the settle is accepted (no
-    // NotFoundError from a clobbered lease_seq) and the row is gone.
+    // LeaseLostError from a clobbered lease_seq) and the row is gone.
     await h.jobRepo.completeJob(leased!.id, leased!.lockSeq, queue);
     expect(await readJobRow(h.pool, leased!.id)).toBeNull();
   });

@@ -1,42 +1,58 @@
-export class InternalServerError extends Error {
-  constructor(message: string = 'Internal Server Error') {
+export class TaskQueueError extends Error {
+  
+}
+
+export class QueueNotFoundError extends TaskQueueError {
+  constructor(message: string = 'Queue not found') {
     super(message);
-    this.name = 'InternalServerError';
+    this.name = 'QueueNotFoundError';
   }
 }
 
-export class NotFoundError extends Error {
-  constructor(message: string = 'Your requested Item is not found') {
+export class JobNotFoundError extends TaskQueueError {
+  constructor(message: string = 'Job not found') {
     super(message);
-    this.name = 'NotFoundError';
+    this.name = 'JobNotFoundError';
   }
 }
 
-export class ConflictError extends Error {
-  constructor(message: string = 'Your Item already exist') {
+/**
+ * A settle carried a `lease_seq` that no longer owns the job: the lease expired
+ * and was reclaimed, the job was already settled, or it was never pulled. The
+ * caller has been fenced off and must not assume its work was recorded.
+ */
+export class LeaseLostError extends TaskQueueError {
+  constructor(message: string = 'Lease is no longer held') {
     super(message);
-    this.name = 'ConflictError';
+    this.name = 'LeaseLostError';
   }
 }
 
-export class BadParamInputError extends Error {
-  constructor(message: string = 'Given Param is not valid') {
+/**
+ * The queue was created by a racing transaction and dropped again before it
+ * could be read back. Retryable.
+ */
+export class QueueCreateRaceError extends TaskQueueError {
+  constructor(message: string = 'Queue was created and removed mid-create') {
     super(message);
-    this.name = 'BadParamInputError';
+    this.name = 'QueueCreateRaceError';
   }
 }
 
-export class NonRetryableError extends Error {
-  constructor(message: string = 'Job is not retryable') {
+/**
+ * A publish statement returned no row for one of its inputs. Guards an
+ * invariant rather than a race — there is no known way to reach it.
+ */
+export class PublishInvariantError extends TaskQueueError {
+  constructor(message: string = 'Publish returned no row for an input') {
     super(message);
-    this.name = 'NonRetryableError';
+    this.name = 'PublishInvariantError';
   }
 }
 
-export class JobSnooze extends Error {
+export class JobSnooze extends TaskQueueError {
   constructor(message: string = 'Job Snooze'){
     super(message);
     this.name = 'JobSnooze'
   }
 }
-

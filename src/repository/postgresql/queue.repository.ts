@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { Queue, CreateQueueInput, NUMBER_OF_SHARD, QueueShards } from '../../domain/queue';
-import { ConflictError, NotFoundError } from '../../domain/errors';
+import { QueueCreateRaceError, QueueNotFoundError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
 
 // Database row interface (snake_case)
@@ -37,7 +37,7 @@ export class QueueRepository {
     );
 
     if (result.rows.length === 0) {
-      throw new NotFoundError(`Queue with id ${id} not found`);
+      throw new QueueNotFoundError(`Queue with id ${id} not found`);
     }
 
     const queue = this.deserializeQueue(result.rows[0] as QueueRow);
@@ -97,7 +97,7 @@ export class QueueRepository {
 
         if (existingResult.rows.length === 0) {
           // Taken, then dropped again before this read. Nothing to hand back.
-          throw new ConflictError(`Queue "${name}" was created and removed mid-create`);
+          throw new QueueCreateRaceError(`Queue "${name}" was created and removed mid-create`);
         }
 
         const existing = this.deserializeQueue(existingResult.rows[0] as QueueRow);
