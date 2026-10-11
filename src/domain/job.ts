@@ -60,6 +60,12 @@ export interface CreateJobInput {
   attempts?: number;
   metadata?: Metadata;
   group?: Group;
+  /**
+   * Keeps the job from being pulled until this many milliseconds after the
+   * publish. Omitted, zero or negative, the job is available at once. A
+   * duplicate publish keeps the existing job's schedule.
+   */
+  delayMs?: number;
 }
 
 

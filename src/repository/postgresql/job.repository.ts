@@ -126,7 +126,8 @@ export class JobRepository {
    * learns its identity. A duplicate does write the row it resolves to — that
    * is what makes the row come back — but it writes only `revision`, leaving
    * `status`, `attempts` and the lease columns alone, so a job a worker is
-   * holding is unaffected by it.
+   * holding is unaffected by it. `available_at` is left alone too: a
+   * duplicate's `delayMs` does not reschedule the job that holds the key.
    *
    * The cost is a row lock on that job, held until the caller commits:
    * `pullJob` and the reaper both use SKIP LOCKED and step around it, but that
@@ -180,6 +181,11 @@ export class JobRepository {
     // do with the rest.
     const firstByKey = new Map<string, CreateJobInput>();
     for (const input of inputs) {
+      // Checked here, before anything is sent, so one bad delay rejects the
+      // batch with a clear message rather than as "interval out of range".
+      if (input.delayMs != null && !Number.isFinite(input.delayMs)) {
+        throw new RangeError(`delayMs must be a finite number of milliseconds, got ${input.delayMs}`);
+      }
       const key = jobKey(input.queueId, input.idempotencyKey);
       if (!firstByKey.has(key)) {
         firstByKey.set(key, input);
@@ -202,6 +208,7 @@ export class JobRepository {
     const queueIds: number[] = [];
     const attempts: number[] = [];
     const metadatas: string[] = [];
+    const delays: (number | null)[] = [];
 
     // Keyed on queue + group: the same group name under two queues is two
     // independent caps, and `group_queue_limits` is keyed that way too.
@@ -220,6 +227,7 @@ export class JobRepository {
       queueIds.push(input.queueId);
       attempts.push(input.attempts || 0);
       metadatas.push(JSON.stringify(input.metadata || {}));
+      delays.push(input.delayMs ?? null);
 
       if (input.group?.id && input.group?.concurrency) {
         const key = groupKey(input.queueId, input.group.id);
@@ -244,6 +252,7 @@ export class JobRepository {
       queueIds,
       attempts,
       metadatas,
+      delays,
     ];
 
     let limitsCte = '';
@@ -264,7 +273,7 @@ export class JobRepository {
        limits AS (
          INSERT INTO group_queue_limits (group_id, queue_id, max_running, running, updated_at, created_at)
          SELECT g, q, m, 0, now(), now()
-         FROM unnest($8::text[], $9::bigint[], $10::int[]) AS t(g, q, m)
+         FROM unnest($9::text[], $10::bigint[], $11::int[]) AS t(g, q, m)
          WHERE (SELECT count(*) FROM ins) >= 0
          ON CONFLICT DO NOTHING
        )`;
@@ -293,11 +302,18 @@ export class JobRepository {
     // Nothing else is assigned. The existing job wins a duplicate publish with
     // its `status`, `attempts`, `lease_seq` and `lease_expires_at` intact —
     // clobbering any of those would break a job a worker is holding right now.
+    //
+    // A NULL delay leaves `available_at` NULL (available at once). The delay
+    // counts from statement_timestamp() rather than now(): inside a caller's
+    // transaction now() is when that transaction began, so the delay would
+    // start running before this publish was even issued.
     const result = await executor.query(
       `WITH ins AS (
-         INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata)
-         SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::bigint[],
-                              $6::int[], $7::jsonb[])
+         INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata,
+                           available_at)
+         SELECT k, p, s, g, q, a, m, statement_timestamp() + d * interval '1 millisecond'
+         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::bigint[],
+                     $6::int[], $7::jsonb[], $8::float8[]) AS t(k, p, s, g, q, a, m, d)
          ON CONFLICT (queue_id, idempotency_key)
            DO UPDATE SET revision = jobs.revision + 1
          RETURNING ${JOB_COLUMNS}, revision
