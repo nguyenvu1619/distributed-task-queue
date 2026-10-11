@@ -72,7 +72,8 @@ export async function countProcessingInGroup(
 
 export async function readJobRow(pool: Pool, id: number | string) {
   const { rows } = await pool.query(
-    `SELECT id, status, group_id, queue_shard_no, attempts, lease_seq, lease_expires_at
+    `SELECT id, status, group_id, queue_shard_no, attempts, lease_seq, lease_expires_at,
+            available_at, available_at > now() AS deferred
      FROM jobs WHERE id = $1`,
     [id]
   );

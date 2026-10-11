@@ -1,6 +1,8 @@
 import { JobService } from './job.service';
 import { WorkerOptions, JobHandler } from '../domain/worker';
 import { Queue } from '../domain/queue';
+import { Job } from '../domain/job';
+import { JobSnooze, NonRetryable } from '../domain/errors';
 
 export { WorkerOptions, JobHandler };
 
@@ -48,6 +50,23 @@ export class WorkerService {
     return this.running;
   }
 
+  private async pullSlot(queue: Queue): Promise<Job | null>{
+    const job = await this.jobService.pullJobDirect(queue);
+    return job
+  }
+
+  // Settles a job whose handler threw. `thrown` is unknown because a handler
+  // can throw anything, not just Errors: a JobSignal picks the settle, and
+  // everything else is an ordinary failure that retries within the budget.
+  private async settleThrown(slotIndex: number, job: Job, queue: Queue, thrown: unknown): Promise<void> {
+    if (thrown instanceof JobSnooze) {
+      await this.jobService.snoozeJobDirect(job.id, job.lockSeq, queue, thrown.retryAfterMs);
+      return;
+    }
+    console.error(`[Worker] Slot ${slotIndex} failed job ${job.id}:`, thrown);
+    await this.jobService.failJobDirect(job.id, job.lockSeq, queue, thrown instanceof NonRetryable);
+  }
+
   private async runSlot(slotIndex: number, queue: Queue): Promise<void> {
     while (this.running) {
       try {
@@ -63,20 +82,23 @@ export class WorkerService {
           await this.options.handler(job, payload);
           
         } catch (handlerError) {
-          console.error(`[Worker] Slot ${slotIndex} failed job ${job.id}:`, handlerError);
           try {
-            await this.jobService.failJobDirect(job.id, job.lockSeq, queue);
-          } catch (failError) {
+            await this.settleThrown(slotIndex, job, queue, handlerError);
+          } catch (settleError) {
             console.error(
-              `[Worker] Slot ${slotIndex} could not fail job ${job.id}:`,
-              failError,
+              `[Worker] Slot ${slotIndex} could not settle job ${job.id}:`,
+              settleError,
             );
           }
           continue
         }
+        // add retry here 
         try {
         await this.jobService.completeJobDirect(job.id, job.lockSeq, queue);
         } catch (completeError){
+          // handle case lease lost error
+          // it could be the job completed but the ack from DB is lost in the network, or the job already taken by another work
+          // todo: identify this later
           console.error(`[Worker] Complete ${slotIndex} error:`, completeError)
         }
       } catch (slotError) {

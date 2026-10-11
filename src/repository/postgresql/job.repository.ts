@@ -7,7 +7,7 @@ import { Executor } from '../../domain/executor';
 
 // Every read of an active job returns the same projection.
 const JOB_COLUMNS = `id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
-         attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at`;
+         attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at, available_at`;
 
 
 // Database row interface for the active jobs table (snake_case)
@@ -28,6 +28,7 @@ interface JobRow {
   updated_at: Date;
   lease_seq: number | string;
   lease_expires_at: Date | null;
+  available_at: Date | null;
 }
 
 
@@ -75,7 +76,7 @@ export class JobRepository {
   async getById(id: number): Promise<Job> {
     const result = await this.pool.query(
       `SELECT id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no, attempts,
-       metadata, created_at, updated_at, lease_seq, lease_expires_at
+       metadata, created_at, updated_at, lease_seq, lease_expires_at, available_at
        FROM jobs WHERE id = $1`,
       [id]
     );
@@ -364,7 +365,7 @@ export class JobRepository {
   async pullJobs(status: JobStatus, limit: number): Promise<Job[]> {
     const result = await this.pool.query(
       `SELECT id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no, attempts,
-       metadata, created_at, updated_at, lease_seq, lease_expires_at
+       metadata, created_at, updated_at, lease_seq, lease_expires_at, available_at
        FROM jobs WHERE status = $1 ORDER BY created_at LIMIT $2`,
       [status, limit]
     );
@@ -388,13 +389,14 @@ export class JobRepository {
        WHERE id = (
          SELECT id FROM jobs
          WHERE status = 'PENDING' AND queue_id = $2
+           AND (available_at IS NULL OR available_at <= now())
          ORDER BY created_at
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
        RETURNING id, idempotency_key, payload, status, group_id, queue_id,
                  queue_shard_no, attempts, metadata, created_at, updated_at,
-                 lease_seq, lease_expires_at`,
+                 lease_seq, lease_expires_at, available_at`,
       [queue.leaseDuration, queue.id]
     );
 
@@ -458,6 +460,7 @@ export class JobRepository {
          SELECT id AS job_id, group_id AS grp
          FROM jobs
          WHERE status = 'PENDING' AND queue_id = $2
+           AND (available_at IS NULL OR available_at <= now())
            ${candidateGate}
          ORDER BY created_at
          FOR UPDATE SKIP LOCKED
@@ -540,7 +543,7 @@ export class JobRepository {
       `DELETE FROM jobs
        WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
        RETURNING id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
-                 attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at`,
+                 attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at, available_at`,
       [id, lockSeq]
     );
 
@@ -647,29 +650,33 @@ export class JobRepository {
    * Single DELETE — mirrors completeJobFast.
    * Use when queue.concurrency === 0 AND queue.requiresGroupId === false
    */
-  private async failJobFast(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+  private async failJobFast(id: number, lockSeq: number, queue: Queue, nonRetryable: boolean): Promise<Job> {
     // `attempts` was incremented when the job was leased, so a job still under
     // its budget goes straight back to PENDING. lease_seq is deliberately kept:
     // it is the fence token, and the next lease must out-rank the one that just
     // failed so a late settle from this worker is refused.
-    // Retry and discard are disjoint on the attempts budget, so both branches
-    // ride in one statement and at most one touches the row.
+    // Retry needs budget left AND a retryable failure; discard takes the exact
+    // complement, so both branches ride in one statement and at most one
+    // touches the row. The parentheses around the discard test keep the OR from
+    // escaping the id / lease_seq fence.
     const result = await this.pool.query(
       `WITH retried AS (
          UPDATE jobs
          SET status = 'PENDING', lease_expires_at = NULL, updated_at = now()
-         WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING' AND attempts < $3
+         WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
+           AND attempts < $3 AND NOT $4::boolean
          RETURNING ${JOB_COLUMNS}
        ),
        removed AS (
          DELETE FROM jobs
-         WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING' AND attempts >= $3
+         WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
+           AND (attempts >= $3 OR $4::boolean)
          RETURNING ${JOB_COLUMNS}
        )
        SELECT ${JOB_COLUMNS}, TRUE AS retried FROM retried
        UNION ALL
        SELECT ${JOB_COLUMNS}, FALSE AS retried FROM removed`,
-      [id, lockSeq, queue.maxAttempts]
+      [id, lockSeq, queue.maxAttempts, nonRetryable]
     );
 
     if (result.rows.length === 0) {
@@ -696,12 +703,18 @@ export class JobRepository {
    *
    * The retry keeps lease_seq (the fence token — the next lease must out-rank
    * a late settle from this worker) and clears queue_shard_no because the slot
-   * has been given back. Retry and discard are disjoint on the attempts budget,
-   * so at most one branch touches the row. group_release references
-   * shard_release to pin shard-then-group order — see deleteWithCoordination.
+   * has been given back. Retry needs budget left AND a retryable failure;
+   * discard takes the exact complement, so at most one branch touches the row.
+   * group_release references shard_release to pin shard-then-group order — see
+   * deleteWithCoordination.
    * Use when queue.concurrency > 0 OR queue.requiresGroupId === true
    */
-  private async failJobWithCoordination(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+  private async failJobWithCoordination(
+    id: number,
+    lockSeq: number,
+    queue: Queue,
+    nonRetryable: boolean
+  ): Promise<Job> {
     const result = await this.pool.query(
       `WITH victim AS (
          SELECT id AS job_id, queue_shard_no AS held_shard, group_id AS grp, attempts AS spent
@@ -730,19 +743,19 @@ export class JobRepository {
          UPDATE jobs j
          SET status = 'PENDING', lease_expires_at = NULL, queue_shard_no = NULL, updated_at = now()
          FROM victim v
-         WHERE j.id = v.job_id AND v.spent < $4
+         WHERE j.id = v.job_id AND v.spent < $4 AND NOT $5::boolean
          RETURNING ${JOB_COLUMNS}
        ),
        removed AS (
          DELETE FROM jobs j
          USING victim v
-         WHERE j.id = v.job_id AND v.spent >= $4
+         WHERE j.id = v.job_id AND (v.spent >= $4 OR $5::boolean)
          RETURNING ${JOB_COLUMNS}
        )
        SELECT ${JOB_COLUMNS}, TRUE AS retried FROM retried
        UNION ALL
        SELECT ${JOB_COLUMNS}, FALSE AS retried FROM removed`,
-      [id, lockSeq, queue.id, queue.maxAttempts]
+      [id, lockSeq, queue.id, queue.maxAttempts, nonRetryable]
     );
 
     if (result.rows.length === 0) {
@@ -765,12 +778,121 @@ export class JobRepository {
   /**
    * Public API: marks a job as failed
    * Automatically selects fast or full path based on queue configuration
+   *
+   * `nonRetryable` discards the job whatever budget it has left. It defaults
+   * to false rather than staying optional: `pg` sends `undefined` as NULL, and
+   * NULL in both branch conditions would match neither, turning an ordinary
+   * failure into a LeaseLostError.
    */
-  async failJob(id: number, lockSeq: number, queue: Queue): Promise<Job> {
+  async failJob(id: number, lockSeq: number, queue: Queue, nonRetryable: boolean = false): Promise<Job> {
     if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
-      return this.failJobFast(id, lockSeq, queue);
+      return this.failJobFast(id, lockSeq, queue, nonRetryable);
     }
-    return this.failJobWithCoordination(id, lockSeq, queue);
+    return this.failJobWithCoordination(id, lockSeq, queue, nonRetryable);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Snooze job
+  // ---------------------------------------------------------------------------
+  //
+  // A snooze is a settle, not a field update: the lease ends, the job goes back
+  // to PENDING behind `available_at`, and on the coordination path its slots are
+  // given back. Updating `available_at` on a PROCESSING row would leave the lease
+  // running and the reaper would reclaim it as a crash.
+  //
+  // The attempt pull charged is refunded, so snoozing never spends the budget.
+  // lease_seq is kept for the same reason as on fail: the next lease must
+  // out-rank this one so a late settle from this worker is refused.
+
+  /**
+   * Fast path for snoozing jobs.
+   * Use when queue.concurrency === 0 AND queue.requiresGroupId === false
+   */
+  private async snoozeJobFast(id: number, lockSeq: number, delayMs: number): Promise<Job> {
+    const result = await this.pool.query(
+      `UPDATE jobs
+       SET status = 'PENDING',
+           available_at = now() + ($3 || ' milliseconds')::interval,
+           attempts = attempts - 1,
+           lease_expires_at = NULL,
+           updated_at = now()
+       WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
+       RETURNING ${JOB_COLUMNS}`,
+      [id, lockSeq, delayMs]
+    );
+
+    if (result.rows.length === 0) {
+      throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+    }
+    return this.deserializeJob(result.rows[0] as JobRow);
+  }
+
+  /**
+   * Full path for snoozing jobs — slot release and the reschedule in one
+   * statement, released shard-then-group like deleteWithCoordination.
+   * Use when queue.concurrency > 0 OR queue.requiresGroupId === true
+   */
+  private async snoozeJobWithCoordination(
+    id: number,
+    lockSeq: number,
+    queue: Queue,
+    delayMs: number
+  ): Promise<Job> {
+    const result = await this.pool.query(
+      `WITH victim AS (
+         SELECT id AS job_id, queue_shard_no AS held_shard, group_id AS grp
+         FROM jobs
+         WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
+         FOR UPDATE
+       ),
+       shard_release AS (
+         UPDATE queue_shards qs
+         SET running = GREATEST(qs.running - 1, 0), updated_at = now()
+         FROM victim v
+         WHERE v.held_shard IS NOT NULL
+           AND qs.queue_id = $3 AND qs.shard_no = v.held_shard
+         RETURNING qs.shard_no
+       ),
+       group_release AS (
+         UPDATE group_queue_limits g
+         SET running = GREATEST(g.running - 1, 0), updated_at = now()
+         FROM victim v
+         WHERE v.grp IS NOT NULL
+           AND g.queue_id = $3 AND g.group_id = v.grp
+           AND (SELECT count(*) FROM shard_release) >= 0
+         RETURNING g.group_id
+       ),
+       snoozed AS (
+         UPDATE jobs j
+         SET status = 'PENDING',
+             available_at = now() + ($4 || ' milliseconds')::interval,
+             attempts = j.attempts - 1,
+             lease_expires_at = NULL,
+             queue_shard_no = NULL,
+             updated_at = now()
+         FROM victim v
+         WHERE j.id = v.job_id
+         RETURNING ${JOB_COLUMNS}
+       )
+       SELECT * FROM snoozed`,
+      [id, lockSeq, queue.id, delayMs]
+    );
+
+    if (result.rows.length === 0) {
+      throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
+    }
+    return this.deserializeJob(result.rows[0] as JobRow);
+  }
+
+  /**
+   * Public API: puts a leased job back to PENDING, not pullable for `delayMs`
+   * Automatically selects fast or full path based on queue configuration
+   */
+  async snoozeJob(id: number, lockSeq: number, queue: Queue, delayMs: number): Promise<Job> {
+    if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
+      return this.snoozeJobFast(id, lockSeq, delayMs);
+    }
+    return this.snoozeJobWithCoordination(id, lockSeq, queue, delayMs);
   }
 
   // ---------------------------------------------------------------------------
@@ -888,6 +1010,7 @@ export class JobRepository {
       updatedAt: row.updated_at,
       completedAt: null,              // active jobs are never completed
       leaseExpiresAt: row.lease_expires_at,
+      availableAt: row.available_at,
       lockSeq: toNumber(row.lease_seq)!,
     };
   }

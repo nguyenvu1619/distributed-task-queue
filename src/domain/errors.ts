@@ -1,5 +1,9 @@
+/** Base for errors the library raises to its callers. */
 export class TaskQueueError extends Error {
-  
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskQueueError';
+  }
 }
 
 export class QueueNotFoundError extends TaskQueueError {
@@ -50,9 +54,31 @@ export class PublishInvariantError extends TaskQueueError {
   }
 }
 
-export class JobSnooze extends TaskQueueError {
-  constructor(message: string = 'Job Snooze'){
+/**
+ * Base for what a job handler throws to choose how its job is settled. These
+ * are instructions to the worker, not failures of the queue, so they sit
+ * outside TaskQueueError. Anything else a handler throws is an ordinary
+ * failure and retries within the queue's attempt budget.
+ */
+export class JobSignal extends Error {
+  constructor(message: string) {
     super(message);
-    this.name = 'JobSnooze'
+    this.name = 'JobSignal';
+  }
+}
+
+/** Puts the job back to run again after `retryAfterMs`. */
+export class JobSnooze extends JobSignal {
+  constructor(public readonly retryAfterMs: number, message: string = `Job snoozed for ${retryAfterMs}ms`) {
+    super(message);
+    this.name = 'JobSnooze';
+  }
+}
+
+/** Fails the job for good, skipping any attempts it has left. */
+export class NonRetryable extends JobSignal {
+  constructor(message: string = 'Job is not retryable') {
+    super(message);
+    this.name = 'NonRetryable';
   }
 }

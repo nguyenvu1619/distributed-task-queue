@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     queue_id            BIGINT NOT NULL,
     queue_shard_no      INTEGER NULL,
     attempts            INTEGER NOT NULL DEFAULT 0,
+    -- Earliest time a PENDING job may be pulled. NULL means immediately; a
+    -- snooze pushes it into the future.
+    available_at        TIMESTAMPTZ NULL,
     -- Counts publishes that resolved to this row after the first. The publish
     -- statement needs a value that separates an insert from a deduplicated
     -- conflict, because ON CONFLICT ... DO UPDATE ... RETURNING returns a row

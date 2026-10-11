@@ -12,6 +12,7 @@ export interface Metadata {
 }
 
 export interface Job {
+  // todo: update to uuid?
   id: number;
   idempotencyKey: string;
   payload: string;
@@ -23,6 +24,7 @@ export interface Job {
   updatedAt: Date;
   completedAt: Date | null;
   leaseExpiresAt: Date | null;
+  availableAt: Date | null;
   queueId: number;
   /**
    * Fence token for the current lease. 0 means the job has never been leased;
@@ -59,4 +61,5 @@ export interface CreateJobInput {
   metadata?: Metadata;
   group?: Group;
 }
+
 

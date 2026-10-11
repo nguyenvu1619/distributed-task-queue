@@ -78,7 +78,12 @@ export class JobService {
   }
 
   // Pass a pre-resolved Queue to skip both lookups.
-  async failJobDirect(id: number, lockSeq: number, queue: Queue): Promise<void> {
-    await this.jobRepo.failJob(id, lockSeq, queue);
+  async failJobDirect(id: number, lockSeq: number, queue: Queue, nonRetryable?: boolean): Promise<void> {
+    await this.jobRepo.failJob(id, lockSeq, queue, nonRetryable);
+  }
+
+  // Pass a pre-resolved Queue to skip the per-call queue lookup.
+  async snoozeJobDirect(id: number, lockSeq: number, queue: Queue, delayMs: number): Promise<void> {
+    await this.jobRepo.snoozeJob(id, lockSeq, queue, delayMs);
   }
 }
