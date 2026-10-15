@@ -30,9 +30,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     queue_id            BIGINT NOT NULL,
     queue_shard_no      INTEGER NULL,
     attempts            INTEGER NOT NULL DEFAULT 0,
-    -- Earliest time a PENDING job may be pulled. NULL means immediately; a
-    -- snooze pushes it into the future.
-    available_at        TIMESTAMPTZ NULL,
+    -- Earliest time a PENDING job may be pulled, and its place in line: pull
+    -- hands jobs out in this order. Publish sets it to the publish time plus
+    -- any delay; a snooze pushes it into the future. NOT NULL so the pull
+    -- condition is a single range on idx_job_pending_queue — `IS NULL OR
+    -- <= now()` is two, and NULLs would sort after every due job.
+    available_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- Counts publishes that resolved to this row after the first. The publish
     -- statement needs a value that separates an insert from a deduplicated
     -- conflict, because ON CONFLICT ... DO UPDATE ... RETURNING returns a row
@@ -77,8 +80,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_queue_id_idempotency_key_uniq
 -- than the equivalent full indexes, and they keep the scan off the rows in
 -- states the query can never return.
 
--- Pull queries: WHERE queue_id=$1 AND status='PENDING' ORDER BY created_at
-CREATE INDEX IF NOT EXISTS idx_job_pending_queue ON jobs (queue_id, created_at)
+-- Pull queries: WHERE queue_id=$1 AND status='PENDING' AND available_at <= now()
+-- ORDER BY available_at. available_at follows queue_id so the scan range ends at
+-- now(): jobs that are not due yet sit past it and are never read, however many
+-- are scheduled.
+CREATE INDEX IF NOT EXISTS idx_job_pending_queue ON jobs (queue_id, available_at)
   WHERE status = 'PENDING';
 
 -- Reaper queries: WHERE status='PROCESSING' AND lease_expires_at <= now()

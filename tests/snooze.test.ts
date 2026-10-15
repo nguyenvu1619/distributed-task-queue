@@ -32,7 +32,6 @@ describe('snooze — fast path', () => {
     const pulled = await h.jobRepo.pullJob(queue);
     const outcome = await h.jobRepo.snoozeJob(pulled!.id, pulled!.lockSeq, queue, 60_000);
     expect(outcome.status).toBe(JobStatus.PENDING);
-    expect(outcome.availableAt).not.toBeNull();
 
     const row = await readJobRow(h.pool, published.id);
     expect(row.status).toBe(JobStatus.PENDING);
@@ -56,6 +55,22 @@ describe('snooze — fast path', () => {
     expect(second).not.toBeNull();
     expect(second!.id).toBe(published.id);
     expect(second!.lockSeq).toBeGreaterThan(first!.lockSeq);
+  });
+
+  it('puts the job behind jobs that were due before it once it comes due', async () => {
+    const queue = await h.queueService.createQueue(queueInput({ concurrency: 0 }));
+    const older = await h.jobRepo.publishJob(jobInput(queue.id));
+    const newer = await h.jobRepo.publishJob(jobInput(queue.id));
+
+    const pulled = await h.jobRepo.pullJob(queue);
+    expect(pulled!.id).toBe(older.id);
+    await h.jobRepo.snoozeJob(pulled!.id, pulled!.lockSeq, queue, 60_000);
+    // Due again, but later than `newer` became due. Ordered on created_at,
+    // `older` would jump back to the front.
+    await h.pool.query(`UPDATE jobs SET available_at = now() WHERE id = $1`, [older.id]);
+
+    expect((await h.jobRepo.pullJob(queue))!.id).toBe(newer.id);
+    expect((await h.jobRepo.pullJob(queue))!.id).toBe(older.id);
   });
 
   it('does not spend the attempt budget', async () => {
@@ -87,7 +102,7 @@ describe('snooze — fast path', () => {
 
     const row = await readJobRow(h.pool, pulled!.id);
     expect(row.status).toBe(JobStatus.PROCESSING);
-    expect(row.available_at).toBeNull();
+    expect(row.deferred).toBe(false);
   });
 
   it('rejects snoozing a job that was already completed', async () => {

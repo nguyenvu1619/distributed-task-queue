@@ -26,7 +26,6 @@ describe('delayed publish', () => {
     const queue = await h.queueService.createQueue(queueInput({ concurrency: 0 }));
     const published = await h.jobRepo.publishJob(jobInput(queue.id, { delayMs: 60_000 }));
 
-    expect(published.availableAt).not.toBeNull();
     expect((await readJobRow(h.pool, published.id)).deferred).toBe(true);
     expect(await h.jobRepo.pullJob(queue)).toBeNull();
 
@@ -38,7 +37,7 @@ describe('delayed publish', () => {
     const queue = await h.queueService.createQueue(queueInput({ concurrency: 0 }));
     const published = await h.jobRepo.publishJob(jobInput(queue.id));
 
-    expect(published.availableAt).toBeNull();
+    expect((await readJobRow(h.pool, published.id)).deferred).toBe(false);
     expect((await h.jobRepo.pullJob(queue))?.id).toBe(published.id);
   });
 

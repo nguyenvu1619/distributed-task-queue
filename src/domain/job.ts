@@ -24,7 +24,8 @@ export interface Job {
   updatedAt: Date;
   completedAt: Date | null;
   leaseExpiresAt: Date | null;
-  availableAt: Date | null;
+  /** Earliest time the job may be pulled; pull hands jobs out in this order. */
+  availableAt: Date;
   queueId: number;
   /**
    * Fence token for the current lease. 0 means the job has never been leased;

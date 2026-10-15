@@ -28,7 +28,7 @@ interface JobRow {
   updated_at: Date;
   lease_seq: number | string;
   lease_expires_at: Date | null;
-  available_at: Date | null;
+  available_at: Date;
 }
 
 
@@ -156,10 +156,10 @@ export class JobRepository {
    * what grows is the transaction (lock duration, WAL, how long one connection
    * is held), not the round-trip count.
    *
-   * Every job in a batch is stamped with the same `created_at`: `now()` is the
-   * transaction's start time, not the row's. Pulls order by `created_at`, so
-   * jobs within one batch come out in no particular order relative to each
-   * other. Order across batches is unaffected.
+   * Pulls hand jobs out in `available_at` order, and every job in a batch
+   * starts from the same time — the publish statement's start, plus its own
+   * delay — so undelayed jobs within one batch come out in no particular order
+   * relative to each other. Order across batches is unaffected.
    *
    * @throws PublishInvariantError if the statement returns no row for an input. There is
    * no known way to reach this — DO UPDATE returns on both the insert and the
@@ -303,15 +303,17 @@ export class JobRepository {
     // its `status`, `attempts`, `lease_seq` and `lease_expires_at` intact —
     // clobbering any of those would break a job a worker is holding right now.
     //
-    // A NULL delay leaves `available_at` NULL (available at once). The delay
-    // counts from statement_timestamp() rather than now(): inside a caller's
-    // transaction now() is when that transaction began, so the delay would
-    // start running before this publish was even issued.
+    // `available_at` is the publish statement's start plus the job's delay; no
+    // delay means available at once. statement_timestamp() rather than now():
+    // inside a caller's transaction now() is when that transaction began, so
+    // the delay would start running — and the job would take its place in
+    // line — before this publish was even issued.
     const result = await executor.query(
       `WITH ins AS (
          INSERT INTO jobs (idempotency_key, payload, status, group_id, queue_id, attempts, metadata,
                            available_at)
-         SELECT k, p, s, g, q, a, m, statement_timestamp() + d * interval '1 millisecond'
+         SELECT k, p, s, g, q, a, m,
+                statement_timestamp() + COALESCE(d, 0) * interval '1 millisecond'
          FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::bigint[],
                      $6::int[], $7::jsonb[], $8::float8[]) AS t(k, p, s, g, q, a, m, d)
          ON CONFLICT (queue_id, idempotency_key)
@@ -394,7 +396,11 @@ export class JobRepository {
    * Use when queue.concurrency === 0 AND queue.requiresGroupId === false
    */
   private async pullJobFast(queue: Queue): Promise<Job | null> {
-    // Single UPDATE with RETURNING - combines SELECT + UPDATE atomically
+    // Single UPDATE with RETURNING - combines SELECT + UPDATE atomically.
+    // The due test and the ORDER BY both run on available_at, the column
+    // idx_job_pending_queue sorts on after queue_id, so the index scan ends at
+    // now() and never reads a job that is not due. Ordering on anything else
+    // would walk every scheduled job ahead of the first due one.
     const result = await this.pool.query(
       `UPDATE jobs
        SET status = 'PROCESSING',
@@ -405,8 +411,8 @@ export class JobRepository {
        WHERE id = (
          SELECT id FROM jobs
          WHERE status = 'PENDING' AND queue_id = $2
-           AND (available_at IS NULL OR available_at <= now())
-         ORDER BY created_at
+           AND available_at <= now()
+         ORDER BY available_at
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
@@ -436,6 +442,10 @@ export class JobRepository {
    * - Lock order is shard → job → group, the same order settle and the reaper
    *   release in, so the graph stays acyclic; the shard pick is SKIP LOCKED,
    *   so pullers never queue on it.
+   *
+   * The candidate is picked on available_at for the same reason as in
+   * pullJobFast: the index scan ends at now() instead of walking every
+   * scheduled job.
    *
    * Use when queue.concurrency > 0 OR queue.requiresGroupId === true
    */
@@ -476,9 +486,9 @@ export class JobRepository {
          SELECT id AS job_id, group_id AS grp
          FROM jobs
          WHERE status = 'PENDING' AND queue_id = $2
-           AND (available_at IS NULL OR available_at <= now())
+           AND available_at <= now()
            ${candidateGate}
-         ORDER BY created_at
+         ORDER BY available_at
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        ),
