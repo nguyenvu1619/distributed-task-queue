@@ -6,3 +6,5 @@ dist/
 *.out
 coverage/
 postgres_data/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
