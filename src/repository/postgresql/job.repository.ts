@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, QueryConfig } from 'pg';
 import { Job, JobStatus, CreateJobInput, Metadata, PublishedJob } from '../../domain/job';
 import { Queue } from '../../domain/queue';
 import { JobNotFoundError, LeaseLostError, PublishInvariantError } from '../../domain/errors';
@@ -65,6 +65,20 @@ function toNumber(value: number | string | null): number | null {
     return null;
   }
   return typeof value === 'number' ? value : Number(value);
+}
+
+/**
+ * A settle statement with a client-side timeout. node-postgres honours
+ * `query_timeout` per query as well as per client — when it fires the query
+ * fails with "Query read timeout" and the pool discards that connection rather
+ * than reuse it — but @types/pg only declares it on the client config.
+ * Undefined leaves the client's own setting in force.
+ *
+ * The server may still run the abandoned statement to completion. Every settle
+ * is fenced by lease_seq, so a late commit can only beat a retry, not double it.
+ */
+function timed(text: string, values: unknown[], timeoutMs?: number): QueryConfig & { query_timeout?: number } {
+  return { text, values, query_timeout: timeoutMs };
 }
 
 export class JobRepository {
@@ -564,14 +578,15 @@ export class JobRepository {
    * Single DELETE — no transaction needed.
    * Use when queue.concurrency === 0 AND queue.requiresGroupId === false
    */
-  private async completeJobFast(id: number, lockSeq: number): Promise<Job> {
-    const result = await this.pool.query(
+  private async completeJobFast(id: number, lockSeq: number, timeoutMs?: number): Promise<Job> {
+    const result = await this.pool.query(timed(
       `DELETE FROM jobs
        WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
        RETURNING id, idempotency_key, payload, status, group_id, queue_id, queue_shard_no,
                  attempts, metadata, created_at, updated_at, lease_seq, lease_expires_at, available_at`,
-      [id, lockSeq]
-    );
+      [id, lockSeq],
+      timeoutMs
+    ));
 
     if (result.rows.length === 0) {
       throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
@@ -596,8 +611,13 @@ export class JobRepository {
    * virtue of being a single statement rather than a transaction.
    * Use when queue.concurrency > 0 OR queue.requiresGroupId === true
    */
-  private async completeJobWithCoordination(id: number, lockSeq: number, queue: Queue): Promise<void> {
-    const row = await this.deleteWithCoordination(id, lockSeq, queue);
+  private async completeJobWithCoordination(
+    id: number,
+    lockSeq: number,
+    queue: Queue,
+    timeoutMs?: number
+  ): Promise<void> {
+    const row = await this.deleteWithCoordination(id, lockSeq, queue, timeoutMs);
     if (!row) {
       throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
     }
@@ -616,9 +636,10 @@ export class JobRepository {
   private async deleteWithCoordination(
     id: number,
     lockSeq: number,
-    queue: Queue
+    queue: Queue,
+    timeoutMs?: number
   ): Promise<JobRow | null> {
-    const result = await this.pool.query(
+    const result = await this.pool.query(timed(
       `WITH victim AS (
          SELECT id AS job_id, queue_shard_no AS held_shard, group_id AS grp
          FROM jobs
@@ -649,8 +670,9 @@ export class JobRepository {
          RETURNING ${JOB_COLUMNS}
        )
        SELECT * FROM removed`,
-      [id, lockSeq, queue.id]
-    );
+      [id, lockSeq, queue.id],
+      timeoutMs
+    ));
 
     return result.rows.length > 0 ? (result.rows[0] as JobRow) : null;
   }
@@ -658,13 +680,15 @@ export class JobRepository {
   /**
    * Public API: marks a job as completed
    * Automatically selects fast or full path based on queue configuration
+   *
+   * `timeoutMs` abandons the statement client-side after that long — see `timed`.
    */
-  async completeJob(id: number, lockSeq: number, queue: Queue): Promise<void> {
+  async completeJob(id: number, lockSeq: number, queue: Queue, timeoutMs?: number): Promise<void> {
     if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
-      await this.completeJobFast(id, lockSeq);
+      await this.completeJobFast(id, lockSeq, timeoutMs);
       return
     }
-    await this.completeJobWithCoordination(id, lockSeq, queue);
+    await this.completeJobWithCoordination(id, lockSeq, queue, timeoutMs);
   }
 
   // ---------------------------------------------------------------------------
@@ -676,7 +700,13 @@ export class JobRepository {
    * Single DELETE — mirrors completeJobFast.
    * Use when queue.concurrency === 0 AND queue.requiresGroupId === false
    */
-  private async failJobFast(id: number, lockSeq: number, queue: Queue, nonRetryable: boolean): Promise<Job> {
+  private async failJobFast(
+    id: number,
+    lockSeq: number,
+    queue: Queue,
+    nonRetryable: boolean,
+    timeoutMs?: number
+  ): Promise<Job> {
     // `attempts` was incremented when the job was leased, so a job still under
     // its budget goes straight back to PENDING. lease_seq is deliberately kept:
     // it is the fence token, and the next lease must out-rank the one that just
@@ -685,7 +715,7 @@ export class JobRepository {
     // complement, so both branches ride in one statement and at most one
     // touches the row. The parentheses around the discard test keep the OR from
     // escaping the id / lease_seq fence.
-    const result = await this.pool.query(
+    const result = await this.pool.query(timed(
       `WITH retried AS (
          UPDATE jobs
          SET status = 'PENDING', lease_expires_at = NULL, updated_at = now()
@@ -702,8 +732,9 @@ export class JobRepository {
        SELECT ${JOB_COLUMNS}, TRUE AS retried FROM retried
        UNION ALL
        SELECT ${JOB_COLUMNS}, FALSE AS retried FROM removed`,
-      [id, lockSeq, queue.maxAttempts, nonRetryable]
-    );
+      [id, lockSeq, queue.maxAttempts, nonRetryable],
+      timeoutMs
+    ));
 
     if (result.rows.length === 0) {
       throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
@@ -739,9 +770,10 @@ export class JobRepository {
     id: number,
     lockSeq: number,
     queue: Queue,
-    nonRetryable: boolean
+    nonRetryable: boolean,
+    timeoutMs?: number
   ): Promise<Job> {
-    const result = await this.pool.query(
+    const result = await this.pool.query(timed(
       `WITH victim AS (
          SELECT id AS job_id, queue_shard_no AS held_shard, group_id AS grp, attempts AS spent
          FROM jobs
@@ -781,8 +813,9 @@ export class JobRepository {
        SELECT ${JOB_COLUMNS}, TRUE AS retried FROM retried
        UNION ALL
        SELECT ${JOB_COLUMNS}, FALSE AS retried FROM removed`,
-      [id, lockSeq, queue.id, queue.maxAttempts, nonRetryable]
-    );
+      [id, lockSeq, queue.id, queue.maxAttempts, nonRetryable],
+      timeoutMs
+    ));
 
     if (result.rows.length === 0) {
       throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
@@ -809,12 +842,20 @@ export class JobRepository {
    * to false rather than staying optional: `pg` sends `undefined` as NULL, and
    * NULL in both branch conditions would match neither, turning an ordinary
    * failure into a LeaseLostError.
+   *
+   * `timeoutMs` abandons the statement client-side after that long — see `timed`.
    */
-  async failJob(id: number, lockSeq: number, queue: Queue, nonRetryable: boolean = false): Promise<Job> {
+  async failJob(
+    id: number,
+    lockSeq: number,
+    queue: Queue,
+    nonRetryable: boolean = false,
+    timeoutMs?: number
+  ): Promise<Job> {
     if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
-      return this.failJobFast(id, lockSeq, queue, nonRetryable);
+      return this.failJobFast(id, lockSeq, queue, nonRetryable, timeoutMs);
     }
-    return this.failJobWithCoordination(id, lockSeq, queue, nonRetryable);
+    return this.failJobWithCoordination(id, lockSeq, queue, nonRetryable, timeoutMs);
   }
 
   // ---------------------------------------------------------------------------
@@ -834,8 +875,8 @@ export class JobRepository {
    * Fast path for snoozing jobs.
    * Use when queue.concurrency === 0 AND queue.requiresGroupId === false
    */
-  private async snoozeJobFast(id: number, lockSeq: number, delayMs: number): Promise<Job> {
-    const result = await this.pool.query(
+  private async snoozeJobFast(id: number, lockSeq: number, delayMs: number, timeoutMs?: number): Promise<Job> {
+    const result = await this.pool.query(timed(
       `UPDATE jobs
        SET status = 'PENDING',
            available_at = now() + ($3 || ' milliseconds')::interval,
@@ -844,8 +885,9 @@ export class JobRepository {
            updated_at = now()
        WHERE id = $1 AND lease_seq = $2 AND status = 'PROCESSING'
        RETURNING ${JOB_COLUMNS}`,
-      [id, lockSeq, delayMs]
-    );
+      [id, lockSeq, delayMs],
+      timeoutMs
+    ));
 
     if (result.rows.length === 0) {
       throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
@@ -862,9 +904,10 @@ export class JobRepository {
     id: number,
     lockSeq: number,
     queue: Queue,
-    delayMs: number
+    delayMs: number,
+    timeoutMs?: number
   ): Promise<Job> {
-    const result = await this.pool.query(
+    const result = await this.pool.query(timed(
       `WITH victim AS (
          SELECT id AS job_id, queue_shard_no AS held_shard, group_id AS grp
          FROM jobs
@@ -901,8 +944,9 @@ export class JobRepository {
          RETURNING ${JOB_COLUMNS}
        )
        SELECT * FROM snoozed`,
-      [id, lockSeq, queue.id, delayMs]
-    );
+      [id, lockSeq, queue.id, delayMs],
+      timeoutMs
+    ));
 
     if (result.rows.length === 0) {
       throw new LeaseLostError(`Job with id ${id} and lock_seq ${lockSeq} not found or not in PROCESSING status`);
@@ -913,12 +957,14 @@ export class JobRepository {
   /**
    * Public API: puts a leased job back to PENDING, not pullable for `delayMs`
    * Automatically selects fast or full path based on queue configuration
+   *
+   * `timeoutMs` abandons the statement client-side after that long — see `timed`.
    */
-  async snoozeJob(id: number, lockSeq: number, queue: Queue, delayMs: number): Promise<Job> {
+  async snoozeJob(id: number, lockSeq: number, queue: Queue, delayMs: number, timeoutMs?: number): Promise<Job> {
     if ((queue.concurrency === 0 || queue.concurrency === null) && !queue.requiresGroupId) {
-      return this.snoozeJobFast(id, lockSeq, delayMs);
+      return this.snoozeJobFast(id, lockSeq, delayMs, timeoutMs);
     }
-    return this.snoozeJobWithCoordination(id, lockSeq, queue, delayMs);
+    return this.snoozeJobWithCoordination(id, lockSeq, queue, delayMs, timeoutMs);
   }
 
   // ---------------------------------------------------------------------------

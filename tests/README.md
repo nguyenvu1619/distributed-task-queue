@@ -49,10 +49,12 @@ a reused instance would keep serving rows that `TRUNCATE` already removed.
 | `support/invariants.ts` | counter readers, `ProcessingSampler`, concurrency trackers |
 | `support/racers.ts` | `runRace()` — N concurrent pull→hold→settle loops |
 | `support/crash-process.ts` | spawns a real OS process to SIGKILL |
+| `support/flaky-proxy.ts` | TCP proxy in front of Postgres that drops and refuses connections on demand |
 | `fixtures/crash-worker.ts` | child that leases a job then hangs forever |
 | `lifecycle.test.ts` | queue/job state machine, both execution paths |
 | `concurrency.property.test.ts` | caps and mutual exclusion under contention |
 | `crash-fencing.test.ts` | SIGKILL, reaper reclaim, stale-lease rejection |
+| `settle-retry.test.ts` | settles retried through a dropped link, deadline, shutdown, error classification |
 
 ## The three suites
 
