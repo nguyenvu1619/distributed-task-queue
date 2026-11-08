@@ -79,6 +79,20 @@ export class WorkerService {
     );
   }
 
+  // Settles a job whose payload is not JSON. Retrying cannot help, since every
+  // attempt parses the same bytes, and NonRetryable cannot be thrown for it,
+  // since the handler never runs. Only the worker can tell, so it fails the job
+  // for good on its first pull instead of spending the whole budget on the same
+  // SyntaxError. One line rather than a stack: the trace only points here.
+  private async discardMalformed(slotIndex: number, job: Job, queue: Queue, parseError: unknown): Promise<void> {
+    console.error(
+      `[Worker] Slot ${slotIndex} discarding job ${job.id} (key ${job.idempotencyKey}): payload cannot be parsed: ${summarize(parseError)}`
+    );
+    await this.settle(slotIndex, job, (timeoutMs) =>
+      this.jobService.failJobDirect(job.id, job.lockSeq, queue, true, timeoutMs)
+    );
+  }
+
   // Records a job's outcome — complete, fail or snooze — retrying through
   // transient failures. Dropping it on the first connection reset leaves the
   // job PROCESSING until its lease runs out, and the reaper then hands it to
@@ -119,10 +133,18 @@ export class WorkerService {
           continue;
         }
 
+        // Parsed outside the handler's try, so a payload that can never parse
+        // is not mistaken for a handler failure worth retrying.
+        let payload: unknown;
         try {
-          const payload = JSON.parse(job.payload);
+          payload = JSON.parse(job.payload);
+        } catch (parseError) {
+          await this.discardMalformed(slotIndex, job, queue, parseError);
+          continue;
+        }
+
+        try {
           await this.options.handler(job, payload);
-          
         } catch (handlerError) {
           await this.settleThrown(slotIndex, job, queue, handlerError);
           continue

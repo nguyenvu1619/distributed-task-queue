@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { JobStatus } from '../src/domain/job';
 import { NUMBER_OF_SHARD } from '../src/domain/queue';
@@ -137,5 +137,41 @@ describe('non-retryable failure — worker', () => {
     }
 
     expect(calls).toBe(1);
+  });
+
+  it('discards a job whose payload is not JSON on its first pull, without calling the handler', async () => {
+    const queue = await h.queueService.createQueue(queueInput({ concurrency: 0, maxAttempts: 3 }));
+    // What a producer gets from String(obj) instead of JSON.stringify(obj).
+    const malformed = await h.jobRepo.publishJob(jobInput(queue.id, { payload: String({ hello: 'world' }) }));
+    const healthy = await h.jobRepo.publishJob(jobInput(queue.id));
+
+    const pull = vi.spyOn(h.jobService, 'pullJobDirect');
+    const handled: number[] = [];
+    const worker = new WorkerService(h.jobService, {
+      queueId: queue.id,
+      pollInterval: 20,
+      handler: async (job) => {
+        handled.push(job.id);
+      },
+    });
+
+    await worker.start();
+    try {
+      await waitFor(
+        async () =>
+          (await readJobRow(h.pool, malformed.id)) === null && (await readJobRow(h.pool, healthy.id)) === null,
+        { message: 'both jobs to be settled' }
+      );
+    } finally {
+      await worker.stop();
+    }
+
+    expect(handled, 'the handler must never see the malformed job').toEqual([healthy.id]);
+    // Each pull spends an attempt. The bytes never change, so a second pull
+    // could only fail the same way.
+    const malformedPulls = pull.mock.settledResults.filter(
+      (result) => result.type === 'fulfilled' && result.value?.id === malformed.id
+    );
+    expect(malformedPulls, 'a payload that cannot parse must not be retried').toHaveLength(1);
   });
 });
