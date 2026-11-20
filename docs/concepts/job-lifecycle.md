@@ -138,4 +138,6 @@ const worker = new WorkerService(jobService, {
 ```
 
 This does not catch the case where the last attempt ends with an expired lease
-instead of an error: the reaper deletes such jobs without reporting them.
+instead of an error. The handler never sees those jobs: the reaper deletes them
+and logs their ids at `warn`. See
+[Crash recovery](../guides/crash-recovery.md#jobs-that-kill-their-worker).

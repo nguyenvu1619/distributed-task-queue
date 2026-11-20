@@ -20,19 +20,19 @@ import { ReaperService } from 'distributed-task-queue';
 
 const reaper = new ReaperService(jobRepo, {
   interval: 30_000, // ms between passes
-  batchSize: 100,   // most jobs reclaimed per pass
+  batchSize: 100,   // jobs per statement
 });
 
 reaper.start();      // runs a pass now, then one every `interval`
 
 // on shutdown
-await reaper.stop(); // waits for a pass in flight
+await reaper.stop(); // waits for the batch in flight
 ```
 
 | Option      | Default    | Meaning |
 | ----------- | ---------- | ------- |
 | `interval`  | `30000`    | Milliseconds between the end of one pass and the start of the next. |
-| `batchSize` | `100`      | Most expired jobs handled per pass. |
+| `batchSize` | `100`      | Expired jobs handled per statement. A pass runs as many statements as the backlog needs. |
 | `logger`    | console    | Where its log lines go. See [Logging](production.md#logging). |
 
 `0` for `interval` or `batchSize` means the default. One reaper covers every
@@ -40,8 +40,9 @@ queue in the database.
 
 ## What a pass does
 
-A pass handles up to `batchSize` jobs that are `PROCESSING` with an expired
-lease. In a single statement, it:
+A pass works through the jobs that are `PROCESSING` with an expired lease,
+longest-expired first, `batchSize` at a time. Each batch is one statement,
+which:
 
 1. gives back their queue and group slots;
 2. deletes the jobs that have used all their attempts, because an expired
@@ -49,11 +50,17 @@ lease. In a single statement, it:
 3. returns the others to `PENDING`. They are due at once and keep their
    original place in line.
 
-`runOnce()` runs one pass and resolves with the ids of the jobs it returned to
-the queue. Jobs it deleted are not included. A pass that returned jobs logs
-`[reaper] Recovered N jobs`; a pass with nothing to do logs nothing. A pass
-that fails, for example while the database is down, logs
-`[reaper] Process error:` with the error, and the next pass runs on schedule.
+The pass keeps running batches until one comes back short of `batchSize`, so a
+large backlog is cleared in one pass. Each batch commits on its own: slots come
+back batch by batch, and no lock is held for longer than one batch.
+
+`runOnce()` runs one pass and resolves with `{ recovered, discarded }`: the ids
+of the jobs it returned to the queue, and of the jobs it deleted. A pass that
+returned jobs logs `[reaper] Recovered N jobs`. Every batch that deleted jobs
+logs `[reaper] Discarded N jobs out of attempts:` with their ids, at `warn`. A
+pass with nothing to do logs nothing. A pass that fails, for example while the
+database is down, logs `[reaper] Process error:` with the error, and the next
+pass runs on schedule.
 
 ## Where to run it
 
@@ -70,14 +77,17 @@ A job whose worker died becomes available again after its lease expires, plus
 up to one reaper interval. The worst case is `leaseDuration + interval`. You
 can lower either one, but a shorter lease also leaves handlers less time.
 
-If more than `batchSize` leases expire at once, the rest wait for the
-following passes.
+A backlog larger than `batchSize`, for example after a whole fleet was killed,
+does not wait for later passes: the pass keeps going until it is cleared.
+`stop()` takes effect between batches, so it waits for one batch, not for the
+whole backlog.
 
 ## Jobs that kill their worker
 
 A job that crashes its worker every time, for example by exhausting memory,
 uses one attempt per crash, and the reaper deletes it when its attempts run
-out. It cannot loop forever. Nothing is logged about which job was deleted.
+out. It cannot loop forever. The deletion is logged with the job's id, and
+`runOnce()` reports it in `discarded`.
 
 ## Workers that come back
 

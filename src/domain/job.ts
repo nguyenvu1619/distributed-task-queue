@@ -49,6 +49,17 @@ export interface PublishedJob extends Job {
   deduplicated: boolean;
 }
 
+/**
+ * What the reaper did with the expired leases it took, in two lists so that a
+ * pass that only deleted jobs does not look like a pass that found nothing.
+ */
+export interface RecoveryResult {
+  /** Returned to PENDING, to run again. */
+  recovered: number[];
+  /** Deleted: the expired lease was their last attempt. */
+  discarded: number[];
+}
+
 export interface Group{
     id: string;
     concurrency: number;

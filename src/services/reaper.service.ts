@@ -1,9 +1,10 @@
 import { JobRepository } from '../repository/postgresql/job.repository';
+import { RecoveryResult } from '../domain/job';
 import { Logger, consoleLogger, prefixed } from '../domain/logger';
 
 export interface ReaperServiceOptions {
-  interval?: number; // milliseconds, default 30000 (30 seconds)
-  batchSize?: number; // default 100
+  interval?: number; // milliseconds between passes, default 30000 (30 seconds)
+  batchSize?: number; // jobs per statement, default 100; a pass runs as many as the backlog needs
   logger?: Logger;
 }
 
@@ -25,8 +26,47 @@ export class ReaperService {
     this.logger = prefixed(options.logger ?? consoleLogger, '[reaper]');
   }
 
-  async runOnce(): Promise<number[]> {
-    return this.jobRepo.recoverJobs(this.batchSize);
+  /**
+   * One pass: reclaims expired leases a batch of `batchSize` at a time until a
+   * batch comes back short. Throughput follows the backlog while each
+   * statement stays small — every batch commits on its own, so slots come back
+   * batch by batch and no lock is held longer than one batch.
+   */
+  async runOnce(): Promise<RecoveryResult> {
+    const pass: RecoveryResult = { recovered: [], discarded: [] };
+    await this.drain(pass, () => true);
+    return pass;
+  }
+
+  /**
+   * Runs batches into `pass` until one comes back short or `keepGoing` says
+   * stop. Short means drained, or that the rest is locked by another reaper,
+   * which is draining it. Each batch lands in `pass` as it commits, so a pass
+   * that fails part-way still accounts for the batches before the failure.
+   */
+  private async drain(pass: RecoveryResult, keepGoing: () => boolean): Promise<void> {
+    for (;;) {
+      const batch = await this.jobRepo.recoverJobs(this.batchSize);
+      for (const id of batch.recovered) pass.recovered.push(id);
+      for (const id of batch.discarded) pass.discarded.push(id);
+
+      // Logged per batch rather than once per pass: a deletion is permanent,
+      // and a later batch failing must not take its record down with it.
+      if (batch.discarded.length > 0) {
+        this.logger.warn(
+          `Discarded ${batch.discarded.length} jobs out of attempts: ${batch.discarded.join(', ')}`
+        );
+      }
+
+      // Discarded jobs count towards a full batch: they left PROCESSING too.
+      // Counting only the recovered ones would end the pass at the first batch
+      // with a deletion in it and leave the rest of the backlog to the next
+      // interval.
+      const handled = batch.recovered.length + batch.discarded.length;
+      if (handled < this.batchSize || !keepGoing()) {
+        return;
+      }
+    }
   }
 
   start(): void {
@@ -42,15 +82,19 @@ export class ReaperService {
         return;
       }
 
+      const pass: RecoveryResult = { recovered: [], discarded: [] };
       try {
-        const ids = await this.runOnce();
-        // Silent when there is nothing to recover — that is the normal case,
-        // and a heartbeat every interval is just noise in a log.
-        if (ids.length > 0) {
-          this.logger.info(`Recovered ${ids.length} jobs`);
-        }
+        // `running` is checked between batches, so stop() waits for the
+        // statement in flight rather than for the whole backlog to drain.
+        await this.drain(pass, () => this.running);
       } catch (error) {
         this.logger.error('Process error:', error);
+      }
+      // Silent when there is nothing to recover — that is the normal case,
+      // and a heartbeat every interval is just noise in a log. Still reported
+      // after a failure, for the batches that committed before it.
+      if (pass.recovered.length > 0) {
+        this.logger.info(`Recovered ${pass.recovered.length} jobs`);
       }
 
       if (this.running) {

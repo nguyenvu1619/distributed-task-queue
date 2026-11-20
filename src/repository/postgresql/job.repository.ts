@@ -1,5 +1,5 @@
 import { Pool, QueryConfig } from 'pg';
-import { Job, JobStatus, CreateJobInput, Metadata, PublishedJob } from '../../domain/job';
+import { Job, JobStatus, CreateJobInput, Metadata, PublishedJob, RecoveryResult } from '../../domain/job';
 import { Queue } from '../../domain/queue';
 import { JobNotFoundError, LeaseLostError, PublishInvariantError } from '../../domain/errors';
 import { Logger, consoleLogger } from '../../domain/logger';
@@ -972,16 +972,25 @@ export class JobRepository {
   // ---------------------------------------------------------------------------
 
   /**
-   * Reclaims jobs whose lease has expired — the crash-recovery path.
+   * Reclaims up to `limit` jobs whose lease has expired, longest-expired
+   * first — one batch of the crash-recovery path.
    *
    * A job that has burned through max_attempts is discarded here rather than
-   * reset, so a job that reliably kills its worker cannot loop for ever.
+   * reset, so a job that reliably kills its worker cannot loop for ever. The
+   * two outcomes come back apart: a batch that only discarded must not read as
+   * one that found nothing, and a caller draining the backlog counts both to
+   * tell whether the batch was full.
    */
-  async recoverJobs(limit: number = 100): Promise<number[]> {
+  async recoverJobs(limit: number = 100): Promise<RecoveryResult> {
     // The whole sweep — pick, release slots, discard exhausted, reset the rest —
     // is one statement, so the reaper neither pins a pooled connection nor
     // opens a transaction.
     //
+    // - Victims are ordered on lease_expires_at, the key idx_job_processing_lease
+    //   is sorted on, so the scan walks the index and stops after `limit` rows.
+    //   Ordering on created_at DESC read and sorted the whole backlog on every
+    //   batch, and served the newest first: under a sustained backlog the
+    //   longest-stranded jobs were never reached.
     // - max_attempts lives on the queue, and the reaper spans every queue, so
     //   the budget has to be joined in. Only `jobs` is locked — `queues` is a
     //   read-only lookup, and FOR UPDATE OF v applies to the victims CTE.
@@ -1006,7 +1015,7 @@ export class JobRepository {
          FROM jobs j
          JOIN queues q ON q.id = j.queue_id
          WHERE j.status = 'PROCESSING' AND j.lease_expires_at <= now()
-         ORDER BY j.created_at DESC
+         ORDER BY j.lease_expires_at
          LIMIT $1
          FOR UPDATE OF j SKIP LOCKED
        ),
@@ -1051,11 +1060,17 @@ export class JobRepository {
          WHERE j.id = v.job_id AND v.spent < v.budget
          RETURNING j.id
        )
-       SELECT r.id FROM retried r`,
+       SELECT 'recovered' AS outcome, r.id FROM retried r
+       UNION ALL
+       SELECT 'discarded' AS outcome, d.id FROM removed d`,
       [limit]
     );
 
-    return result.rows.map((row) => Number(row.id));
+    const outcome: RecoveryResult = { recovered: [], discarded: [] };
+    for (const row of result.rows) {
+      (row.outcome === 'recovered' ? outcome.recovered : outcome.discarded).push(Number(row.id));
+    }
+    return outcome;
   }
 
   // ---------------------------------------------------------------------------

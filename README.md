@@ -401,8 +401,8 @@ Starts the reaper service to automatically recover expired jobs.
 #### `stop(): void`
 Stops the reaper service.
 
-#### `runOnce(): Promise<number[]>`
-Manually run the reaper once. Returns array of recovered job IDs.
+#### `runOnce(): Promise<RecoveryResult>`
+Manually run the reaper once, until the expired backlog is drained. Returns `{ recovered, discarded }`: the IDs returned to the queue and the IDs deleted for running out of attempts.
 
 ## Architecture
 

@@ -45,8 +45,6 @@ See [Group concurrency](concepts/concurrency-control.md#group-concurrency).
 - **No job history and no dead-letter queue.** Completed and failed jobs are
   deleted. *Workaround:* record what you need in the handler; see
   [No history](concepts/job-lifecycle.md#no-history).
-- **Silent discards by the reaper.** A job whose last attempt ends with an
-  expired lease is deleted without a log line naming it.
 
 ## Queues
 

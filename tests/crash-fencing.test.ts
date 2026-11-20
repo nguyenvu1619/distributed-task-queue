@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JobStatus } from '../src/domain/job';
 import { NUMBER_OF_SHARD, Queue } from '../src/domain/queue';
 import { LeaseLostError } from '../src/domain/errors';
+import { silentLogger } from '../src/domain/logger';
+import { ReaperService } from '../src/services/reaper.service';
 import {
   Harness,
   createHarness,
@@ -35,6 +37,19 @@ async function expireLease(pool: Pool, id: number | string): Promise<void> {
     id,
   ]);
 }
+
+/** Leases `count` jobs on `queue`, then forces every lease in the table into the past. */
+async function strandJobs(queue: Queue, count: number): Promise<number[]> {
+  const ids: number[] = [];
+  for (let i = 0; i < count; i++) {
+    ids.push((await h.jobRepo.publishJob(jobInput(queue.id))).id);
+    await h.jobRepo.pullJob(queue);
+  }
+  await h.pool.query(`UPDATE jobs SET lease_expires_at = now() - interval '1 second'`);
+  return ids;
+}
+
+const byId = (a: number, b: number): number => a - b;
 
 async function fastQueue(overrides = {}): Promise<Queue> {
   return h.queueService.createQueue(
@@ -73,7 +88,7 @@ describe('crash recovery — a worker killed mid-job', () => {
     await worker.pulled;
     await worker.kill();
 
-    expect(await h.reaper.runOnce()).toEqual([]);
+    expect(await h.reaper.runOnce()).toEqual({ recovered: [], discarded: [] });
     expect((await readJobRow(h.pool, (await h.jobRepo.pullJobs(JobStatus.PROCESSING, 1))[0].id)).status)
       .toBe(JobStatus.PROCESSING);
   });
@@ -97,7 +112,7 @@ describe('crash recovery — a worker killed mid-job', () => {
       { timeout: 10_000, message: 'lease to expire' }
     );
 
-    const recovered = await h.reaper.runOnce();
+    const { recovered } = await h.reaper.runOnce();
     expect(recovered.map(String)).toContain(String(published.id));
 
     const row = await readJobRow(h.pool, published.id);
@@ -214,7 +229,7 @@ describe('reaper', () => {
     await h.jobRepo.publishJob(jobInput(queue.id));
     await h.jobRepo.pullJob(queue);
 
-    expect(await h.reaper.runOnce()).toEqual([]);
+    expect(await h.reaper.runOnce()).toEqual({ recovered: [], discarded: [] });
   });
 
   it('reclaims several expired jobs in one pass', async () => {
@@ -227,7 +242,7 @@ describe('reaper', () => {
     }
     await h.pool.query(`UPDATE jobs SET lease_expires_at = now() - interval '1 second'`);
 
-    const recovered = (await h.reaper.runOnce()).map(String);
+    const recovered = (await h.reaper.runOnce()).recovered.map(String);
     expect(recovered.sort()).toEqual(ids.sort());
 
     const { rows } = await h.pool.query(
@@ -242,7 +257,7 @@ describe('reaper', () => {
     await h.jobRepo.pullJob(queue);
     await expireLease(h.pool, published.id);
 
-    const recovered = (await h.reaper.runOnce()).map(String);
+    const recovered = (await h.reaper.runOnce()).recovered.map(String);
     expect(recovered, 'coordinated jobs are never reclaimed').toContain(String(published.id));
 
     const row = await readJobRow(h.pool, published.id);
@@ -296,7 +311,8 @@ describe('reaper', () => {
 
     await h.jobRepo.pullJob(queue);
     await expireLease(h.pool, published.id);
-    expect(await h.reaper.runOnce()).toEqual([]);
+    // A pass that destroyed a job must not look like a pass that found nothing.
+    expect(await h.reaper.runOnce()).toEqual({ recovered: [], discarded: [published.id] });
 
     expect(await readJobRow(h.pool, published.id)).toBeNull();
     const shards = await readShardCounters(h.pool, queue.id);
@@ -317,5 +333,85 @@ describe('reaper', () => {
 
     expect((await readJobRow(h.pool, bystanderJob.id)).status).toBe(JobStatus.PROCESSING);
     expect((await readJobRow(h.pool, victimJob.id)).status).toBe(JobStatus.PENDING);
+  });
+});
+
+describe('reaper — a backlog larger than one batch', () => {
+  const reaperWith = (options: { batchSize: number; interval?: number }): ReaperService =>
+    new ReaperService(h.jobRepo, { logger: silentLogger, ...options });
+
+  it('drains the whole backlog in one pass, a batch at a time', async () => {
+    const queue = await fastQueue();
+    const ids = await strandJobs(queue, 5);
+
+    const { recovered, discarded } = await reaperWith({ batchSize: 2 }).runOnce();
+
+    expect(recovered.sort(byId)).toEqual(ids.sort(byId));
+    expect(discarded).toEqual([]);
+    expect(await h.jobRepo.countByStatus(queue.id)).toEqual({ pending: 5, processing: 0 });
+  });
+
+  it('keeps draining when a whole batch is discarded', async () => {
+    // Every job is on its last attempt, so each batch deletes and returns
+    // nothing to the queue. Counting only the returned jobs would read the
+    // first batch as short and stop with three jobs still stranded.
+    const queue = await fastQueue({ maxAttempts: 1 });
+    const ids = await strandJobs(queue, 5);
+
+    const { recovered, discarded } = await reaperWith({ batchSize: 2 }).runOnce();
+
+    expect(recovered).toEqual([]);
+    expect(discarded.sort(byId)).toEqual(ids.sort(byId));
+    expect(await h.jobRepo.countByStatus(queue.id)).toEqual({ pending: 0, processing: 0 });
+  });
+
+  it('reclaims the longest-expired lease first, whatever the creation order', async () => {
+    const queue = await fastQueue();
+    const [a, b, c] = await strandJobs(queue, 3);
+    // Created a, b, c; expired b first, then c, then a.
+    const expiredAgo: Array<[number, number]> = [[a, 1], [b, 3], [c, 2]];
+    for (const [id, seconds] of expiredAgo) {
+      await h.pool.query(
+        `UPDATE jobs SET lease_expires_at = now() - make_interval(secs => $2) WHERE id = $1`,
+        [id, seconds]
+      );
+    }
+
+    const order: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      order.push(...(await h.jobRepo.recoverJobs(1)).recovered);
+    }
+    expect(order).toEqual([b, c, a]);
+  });
+
+  it('a scheduled pass drains the backlog without waiting for the next interval', async () => {
+    const queue = await fastQueue();
+    await strandJobs(queue, 5);
+    // The next pass is a minute away, so only the pass start() runs at once
+    // can bring all five back before the deadline.
+    const reaper = reaperWith({ batchSize: 2, interval: 60_000 });
+
+    reaper.start();
+    try {
+      await waitFor(async () => (await h.jobRepo.countByStatus(queue.id)).pending === 5, {
+        timeout: 5_000,
+        message: 'the whole backlog back in PENDING',
+      });
+    } finally {
+      await reaper.stop();
+    }
+  });
+
+  it('stop() during a drain waits for the batch in flight, not the whole backlog', async () => {
+    const queue = await fastQueue();
+    await strandJobs(queue, 20);
+    const reaper = reaperWith({ batchSize: 1, interval: 60_000 });
+
+    reaper.start();
+    await reaper.stop();
+
+    const { pending, processing } = await h.jobRepo.countByStatus(queue.id);
+    expect(pending, 'the drain ran on after stop()').toBeLessThanOrEqual(1);
+    expect(processing).toBeGreaterThanOrEqual(19);
   });
 });

@@ -87,6 +87,7 @@ What gets logged:
 | `JobRepository`   | `warn`  | A pull on the coordination path was refused because the queue has no free slot (`No available queue shard for queue Q`) or the job's group is at its cap (`Group queue limit reached for group G and queue Q`). |
 | `QueueRepository` | `warn`  | `createQueue` found an existing queue with that name. |
 | `ReaperService`   | `info`  | Start, stop, and each pass that returned jobs to the queue. |
+| `ReaperService`   | `warn`  | A batch deleted jobs whose last attempt ended with an expired lease (`Discarded N jobs out of attempts: ids`). |
 | `ReaperService`   | `error` | A pass failed. |
 | `WorkerService`   | console only | Start and stop, failed jobs, settle retries, lost leases, pull errors. See [Workers](workers.md#logging). |
 

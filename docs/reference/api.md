@@ -258,16 +258,19 @@ previous pass ends. Does nothing if already running.
 stop(): Promise<void>
 ```
 
-Stops scheduling passes and waits for one in flight.
+Stops scheduling passes. A pass in flight stops after its current batch, and
+`stop()` waits for that batch.
 
 ### runOnce
 
 ```ts
-runOnce(): Promise<number[]>
+runOnce(): Promise<RecoveryResult>
 ```
 
-Runs one pass. Resolves with the ids of the jobs returned to the queue; jobs
-deleted for running out of attempts are not included.
+Runs one pass: batches of `batchSize` until one comes back short, so the whole
+expired backlog is handled. Resolves with the ids of the jobs returned to the
+queue and, separately, of the jobs deleted for running out of attempts. See
+[RecoveryResult](#recoveryresult).
 
 ### isRunning
 
@@ -294,7 +297,7 @@ method the services do not expose, such as `snoozeJob` with a return value or
 | `completeJob(id, lockSeq, queue, timeoutMs?)` | `Promise<void>` | Throws `LeaseLostError`. |
 | `failJob(id, lockSeq, queue, nonRetryable = false, timeoutMs?)` | `Promise<Job>` | `status` is `PENDING` (retried) or `FAILED` (discarded). Throws `LeaseLostError`. |
 | `snoozeJob(id, lockSeq, queue, delayMs, timeoutMs?)` | `Promise<Job>` | The job as rescheduled. Throws `LeaseLostError`. |
-| `recoverJobs(limit = 100)` | `Promise<number[]>` | One reaper pass. |
+| `recoverJobs(limit = 100)` | `Promise<RecoveryResult>` | One reaper batch: up to `limit` expired leases, longest-expired first. |
 | `countByStatus(queueId)` | `Promise<{ pending; processing }>` | |
 | `pullJobs(status, limit)` | `Promise<Job[]>` | Read-only listing across all queues. |
 
@@ -471,12 +474,24 @@ interface SettleRetryOptions {
 
 See [Recording outcomes through database errors](../guides/workers.md#recording-outcomes-through-database-errors).
 
+### RecoveryResult
+
+```ts
+interface RecoveryResult {
+  recovered: number[]; // returned to PENDING, to run again
+  discarded: number[]; // deleted: the expired lease was their last attempt
+}
+```
+
+Kept as two lists so that a pass that only deleted jobs does not look like a
+pass that found nothing.
+
 ### ReaperServiceOptions
 
 ```ts
 interface ReaperServiceOptions {
-  interval?: number;  // ms, default 30000
-  batchSize?: number; // default 100
+  interval?: number;  // ms between passes, default 30000
+  batchSize?: number; // jobs per statement, default 100
   logger?: Logger;    // default: console
 }
 ```
