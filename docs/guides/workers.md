@@ -20,7 +20,7 @@ await worker.start();
 | Option         | Type                           | Default         | Meaning |
 | -------------- | ------------------------------ | --------------- | ------- |
 | `queueId`      | number                         | required        | Queue to pull from. `start()` rejects with `QueueNotFoundError` if it does not exist. |
-| `handler`      | `(job, payload) => Promise<void>` | required     | Your code. See [Writing a handler](#writing-a-handler). |
+| `handler`      | `(job, payload, signal) => Promise<void>` | required | Your code. See [Writing a handler](#writing-a-handler). |
 | `concurrency`  | number                         | `1`             | Slots: how many jobs this worker runs at once. |
 | `pollInterval` | number (ms)                    | `1000`          | How long a slot waits after finding no due job, or after an error, before it pulls again. |
 | `settleRetry`  | `SettleRetryOptions`           | see [below](#recording-outcomes-through-database-errors) | How long to keep trying to record an outcome through database errors. |
@@ -35,7 +35,7 @@ they can share the same `JobService` and pool.
 ## Writing a handler
 
 ```ts
-type JobHandler<T = any> = (job: Job, payload: T) => Promise<void>;
+type JobHandler<T = any> = (job: Job, payload: T, signal: AbortSignal) => Promise<void>;
 ```
 
 - **`payload`** is `JSON.parse(job.payload)`. Annotate it to type it:
@@ -44,6 +44,8 @@ type JobHandler<T = any> = (job: Job, payload: T) => Promise<void>;
 - **`job`** is the leased job. Useful fields: `id`, `idempotencyKey`,
   `attempts` (1 on the first run), `groupId`, `metadata`, `createdAt` and
   `leaseExpiresAt`. See [Job](../reference/api.md#job).
+- **`signal`** is an `AbortSignal` that `stop()` aborts. Watch it to stop a
+  long job early. See [Stopping a handler early](#stopping-a-handler-early).
 - **If `job.payload` is not valid JSON**, the handler is not called and the
   job is failed for good on its first pull, as if it had thrown
   `NonRetryable`: every retry would parse the same bytes. The worker logs one
@@ -57,6 +59,7 @@ How the handler ends decides what happens to the job:
 | throws `JobSnooze(ms)`        | put back as `PENDING`, due after `ms`; the attempt is refunded             |
 | throws `NonRetryable`         | failed and deleted now, whatever attempts remain                           |
 | throws anything else          | failed: due again at once if attempts remain, otherwise deleted            |
+| throws anything else, after `stop()` | put back as `PENDING`, due at once; the attempt is refunded. See [Stopping a handler early](#stopping-a-handler-early) |
 
 For example, a webhook sender:
 
@@ -209,14 +212,58 @@ queue, and it runs again, using one more attempt.
 await worker.stop();
 ```
 
-`stop()` stops pulling new jobs and waits for every slot to finish the job in
-hand: the handler, then its settle, including settle retries (bounded by
-`settleRetry.deadlineMs`). It resolves when all slots have exited.
+`stop()` stops pulling new jobs, aborts the `signal` passed to every running
+handler, and waits for every slot to finish the job in hand: the handler, then
+its settle, including settle retries (bounded by `settleRetry.deadlineMs`). It
+resolves when all slots have exited.
 
-There is no timeout on the handler. If a handler never returns, `stop()` never
-resolves. If your platform kills the process after a grace period (Kubernetes
-waits 30 seconds by default), make handlers finish well within it. A job cut
-off mid-run is recovered by the reaper once its lease expires.
+### Stopping a handler early
+
+The worker cannot stop a handler from outside: JavaScript has no way to cancel
+a running async function. A handler that ignores `signal` runs to its end, and
+`stop()` waits for it. To stop sooner, the handler has to watch the signal:
+
+```ts
+import { JobSnooze, WorkerService } from 'distributed-task-queue';
+
+const worker = new WorkerService(jobService, {
+  queueId: queue.id,
+  handler: async (job, payload: { rows: Row[]; notifyUrl: string }, signal) => {
+    for (const batch of chunk(payload.rows, 100)) {
+      if (signal.aborted) throw new JobSnooze(0); // hand the job back
+      await saveBatch(batch);
+    }
+    await fetch(payload.notifyUrl, { method: 'POST', signal }); // cancelled by stop()
+  },
+});
+```
+
+- **Check `signal.aborted` where stopping is safe**, such as between two
+  batches. Only the handler knows where those points are.
+- **Pass `signal` to calls that accept one**, such as `fetch` or `setTimeout`
+  from `node:timers/promises`, so a call in flight is cancelled instead of
+  waited out.
+- **Throw `JobSnooze(0)` to hand the job back.** It returns to `PENDING`, due
+  at once, and the attempt is refunded. Do not return early: returning
+  completes the job, and the work left undone is lost.
+- **After `stop()`, any other error also hands the job back**, without
+  spending an attempt, so an aborted `fetch` does not need catching. The worker
+  logs one line for it. `NonRetryable` still fails the job for good. An
+  unrelated error that happens during shutdown is refunded too, and the job
+  runs once more.
+- **A handler can start with `signal` already aborted**, when its job was being
+  pulled as `stop()` was called. Check it before starting expensive work.
+
+Stopping early does not undo work: batches saved before the check stay saved,
+and the next run starts again from the beginning. Handlers must be safe to run
+twice anyway; see
+[Delivery guarantees](../concepts/job-lifecycle.md#delivery-guarantees).
+
+There is no timeout on the handler. If a handler ignores the signal and never
+returns, `stop()` never resolves. If your platform kills the process after a
+grace period (Kubernetes waits 30 seconds by default), make handlers react to
+the signal well within it. A job cut off mid-run is recovered by the reaper
+once its lease expires, and that run counts as an attempt.
 
 A full shutdown sequence is in
 [Running in production](production.md#graceful-shutdown).
@@ -231,6 +278,7 @@ A full shutdown sequence is in
 | `error` | `[Worker] Slot S failed job J:` with the error, for every failed job, `NonRetryable` included |
 | `warn`  | `[Worker] Slot S could not settle job J (attempt N), retrying in Dms: …` |
 | `warn`  | `[Worker] Slot S no longer holds job J; letting it go` |
+| `warn`  | `[Worker] Slot S returning job J to the queue, interrupted by stop(): …` when a handler throws after `stop()` |
 | `error` | `[Worker] Slot S could not settle job J:` with the error, when a settle is given up |
 | `error` | `[Worker] Slot S error:` when a pull fails, for example while the database is down |
 

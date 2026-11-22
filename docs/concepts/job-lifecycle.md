@@ -51,6 +51,7 @@ library gives up on it.
 | Fail              | the handler throws an ordinary error   | Yes            | `PENDING` and due at once if `attempts < maxAttempts`, otherwise deleted |
 | Fail for good     | the handler throws `NonRetryable`, or the payload is not valid JSON (the handler is not called) | Yes | Deleted, whatever attempts remain |
 | Snooze            | the handler throws `JobSnooze(ms)`     | No (refunded)  | `PENDING`, due after `ms` |
+| Interrupted       | the handler throws an ordinary error after `stop()` aborted its signal | No (refunded) | `PENDING`, due at once |
 | Lease expired     | the worker died, or the handler ran past the lease | Yes | The reaper resets it to `PENDING` (due at once) if `attempts < maxAttempts`, otherwise deletes it |
 
 ### There is no backoff between attempts

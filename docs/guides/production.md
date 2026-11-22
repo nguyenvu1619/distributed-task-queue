@@ -118,7 +118,10 @@ process.once('SIGTERM', () => {
 });
 ```
 
-`worker.stop()` waits for running handlers without a timeout. If your
+`worker.stop()` aborts the `signal` of every running handler, then waits for
+the handlers without a timeout. Handlers that watch the signal can hand their
+jobs back at once; see
+[Stopping a handler early](workers.md#stopping-a-handler-early). If your
 platform kills the process after a grace period, jobs that were cut off are
 recovered by the reaper once their leases expire.
 

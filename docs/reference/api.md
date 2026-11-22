@@ -225,8 +225,10 @@ nothing if the worker is already running.
 stop(): Promise<void>
 ```
 
-Stops pulling and resolves once every slot has finished its current job,
-including the settle.
+Stops pulling, aborts the `signal` passed to running handlers, and resolves
+once every slot has finished its current job, including the settle. A handler
+that ignores the signal still runs to its end. See
+[Stopping a handler early](../guides/workers.md#stopping-a-handler-early).
 
 ### isRunning
 
@@ -458,8 +460,11 @@ interface WorkerOptions {
 ### JobHandler
 
 ```ts
-type JobHandler<T = any> = (job: Job, payload: T) => Promise<void>;
+type JobHandler<T = any> = (job: Job, payload: T, signal: AbortSignal) => Promise<void>;
 ```
+
+`signal` is aborted when the worker's `stop()` is called. A handler that
+takes only `(job, payload)` still fits the type.
 
 ### SettleRetryOptions
 

@@ -19,6 +19,9 @@ export class WorkerService {
   private readonly pollInterval: number;
   private running: boolean = false;
   private slots: Promise<void>[] = [];
+  // Handed to every handler, and aborted by stop(). An aborted controller
+  // cannot be reset, so each start() makes a new one.
+  private stopping = new AbortController();
 
   constructor(
     private readonly jobService: JobService,
@@ -38,17 +41,23 @@ export class WorkerService {
     const queue = await this.jobService.getQueue(this.options.queueId);
 
     this.running = true;
+    this.stopping = new AbortController();
     console.log(
       `[Worker] Starting ${this.concurrency} slot(s) for queue ${queue.id}`,
     );
 
-    this.slots = Array.from({ length: this.concurrency }, (_, i) => this.runSlot(i, queue));
+    const signal = this.stopping.signal;
+    this.slots = Array.from({ length: this.concurrency }, (_, i) => this.runSlot(i, queue, signal));
   }
 
-  // Waits for every slot to finish the job in hand, including a settle still
-  // retrying through an outage — bounded by settleRetry.deadlineMs.
+  // Tells the handlers to stop, then waits for every slot to finish the job in
+  // hand, including a settle still retrying through an outage — bounded by
+  // settleRetry.deadlineMs. Aborting is all the worker can do: JS cannot stop
+  // an async function from outside, so a handler that ignores the signal still
+  // runs to its end, and stop() waits for it.
   async stop(): Promise<void> {
     this.running = false;
+    this.stopping.abort();
     await Promise.all(this.slots);
     this.slots = [];
     console.log(`[Worker] Stopped (queue ${this.options.queueId})`);
@@ -66,10 +75,33 @@ export class WorkerService {
   // Settles a job whose handler threw. `thrown` is unknown because a handler
   // can throw anything, not just Errors: a JobSignal picks the settle, and
   // everything else is an ordinary failure that retries within the budget.
-  private async settleThrown(slotIndex: number, job: Job, queue: Queue, thrown: unknown): Promise<void> {
+  //
+  // Except once stop() has aborted the signal: then the failure is most likely
+  // the abort itself, a fetch or timer the worker cancelled, and charging the
+  // job an attempt for the worker's own shutdown would let a deploy delete a
+  // job on its last attempt. So it goes back due at once, attempt refunded. A
+  // real error that lands during shutdown is refunded too and gets one more
+  // run; that beats guessing which errors an abort produces. One line rather
+  // than a stack: a real bug fails again, with its stack, on the next run.
+  private async settleThrown(
+    slotIndex: number,
+    job: Job,
+    queue: Queue,
+    thrown: unknown,
+    stopping: boolean,
+  ): Promise<void> {
     if (thrown instanceof JobSnooze) {
       await this.settle(slotIndex, job, (timeoutMs) =>
         this.jobService.snoozeJobDirect(job.id, job.lockSeq, queue, thrown.retryAfterMs, timeoutMs)
+      );
+      return;
+    }
+    if (stopping && !(thrown instanceof NonRetryable)) {
+      console.warn(
+        `[Worker] Slot ${slotIndex} returning job ${job.id} to the queue, interrupted by stop(): ${summarize(thrown)}`
+      );
+      await this.settle(slotIndex, job, (timeoutMs) =>
+        this.jobService.snoozeJobDirect(job.id, job.lockSeq, queue, 0, timeoutMs)
       );
       return;
     }
@@ -123,7 +155,8 @@ export class WorkerService {
     }
   }
 
-  private async runSlot(slotIndex: number, queue: Queue): Promise<void> {
+  // `signal` is this run's, captured at start(): a restart makes a new one.
+  private async runSlot(slotIndex: number, queue: Queue, signal: AbortSignal): Promise<void> {
     while (this.running) {
       try {
         const job = await this.jobService.pullJobDirect(queue);
@@ -143,10 +176,12 @@ export class WorkerService {
           continue;
         }
 
+        // A pull still in flight when stop() is called still hands out its
+        // job, so a handler can start with the signal already aborted.
         try {
-          await this.options.handler(job, payload);
+          await this.options.handler(job, payload, signal);
         } catch (handlerError) {
-          await this.settleThrown(slotIndex, job, queue, handlerError);
+          await this.settleThrown(slotIndex, job, queue, handlerError, signal.aborted);
           continue
         }
 

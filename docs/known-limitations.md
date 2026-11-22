@@ -37,8 +37,11 @@ See [Group concurrency](concepts/concurrency-control.md#group-concurrency).
   `leaseDuration` can be reclaimed while it runs, and the job then runs twice
   at the same time. *Workaround:* a generous `leaseDuration`, and splitting
   long work into smaller jobs.
-- **Handlers have no timeout or cancellation.** `WorkerService.stop()` waits
-  for a handler that never returns indefinitely.
+- **Handlers have no timeout, and stopping one is up to the handler.**
+  `WorkerService.stop()` aborts the handler's `signal`, but a handler that
+  ignores it runs to its end, and `stop()` waits for it, indefinitely if it
+  never returns. See
+  [Stopping a handler early](guides/workers.md#stopping-a-handler-early).
 
 ## History and visibility
 

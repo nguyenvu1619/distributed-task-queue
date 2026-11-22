@@ -1,6 +1,14 @@
 import { Job } from './job';
 
-export type JobHandler<T = any> = (job: Job, payload: T) => Promise<void>;
+/**
+ * Runs one job. `signal` is aborted when the worker's `stop()` is called. The
+ * worker cannot cancel a running handler, so stopping early is up to the
+ * handler: check `signal.aborted` where stopping is safe, pass `signal` to
+ * calls that take one, and throw `JobSnooze` to hand the job back. Returning
+ * still completes the job. Once the signal is aborted, any other error except
+ * `NonRetryable` also hands the job back, without spending an attempt.
+ */
+export type JobHandler<T = any> = (job: Job, payload: T, signal: AbortSignal) => Promise<void>;
 
 export interface WorkerOptions {
   queueId: number;

@@ -97,8 +97,8 @@ does decides what happens to the job:
 - **It returns normally:** the job is completed and deleted.
 - **It throws:** the job is retried, up to `maxAttempts` runs in total.
 
-[Workers](../guides/workers.md) covers the other outcomes: snoozing a job and
-failing it for good.
+[Workers](../guides/workers.md) covers the other outcomes: snoozing a job,
+failing it for good, and handing it back early when the worker stops.
 
 ## 6. Recover jobs whose worker died
 

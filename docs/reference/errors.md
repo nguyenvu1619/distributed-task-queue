@@ -39,6 +39,9 @@ extend `JobSignal`, which extends `Error`, and are not `TaskQueueError`s.
 | `new NonRetryable(message?)`         | The job is failed and deleted now, whatever attempts remain. |
 
 Throwing `JobSignal` itself, or any other value, counts as an ordinary failure.
+Once `stop()` has aborted the handler's signal, an ordinary failure hands the
+job back instead, without spending an attempt; see
+[Stopping a handler early](../guides/workers.md#stopping-a-handler-early).
 See [Writing a handler](../guides/workers.md#writing-a-handler).
 
 ## Other errors
